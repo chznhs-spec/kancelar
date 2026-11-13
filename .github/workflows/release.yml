@@ -3,10 +3,10 @@ name: Build and Release
 on:
   push:
     tags:
-      - 'v*' # Spustí se automaticky při vytvoření tagu, např. v1.0.0
+      - 'v*'
 
 permissions:
-  contents: write # Oprávnění pro vytvoření release a nahrání souborů
+  contents: write
 
 jobs:
   build:
@@ -19,7 +19,7 @@ jobs:
           - os: windows-latest
             asset_name: vlcr_kancelar_windows_installer.exe
           - os: ubuntu-latest
-            asset_name: vlcr-kancelar-linux.tar.gz
+            asset_name: linux_packages
           - os: macos-latest
             asset_name: vlcr-kancelar-macos.tar.gz
 
@@ -37,12 +37,12 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pillow PyQt5
 
-      # --- SESTAVENÍ APLIKACE S OBRÁZKY ---
+      # --- SESTAVENÍ APLIKACE VČETNĚ OBRÁZKŮ ---
       - name: Sestavení aplikace (PyInstaller)
         run: |
           pyinstaller --noconsole --onedir -n vlcr-kancelar --add-data "images${{ matrix.os == 'windows-latest' && ';' || ':' }}images" main.py
 
-      # --- DOPLNĚNÍ MODULŮ APPS DO DIST STRUKTURY ---
+      # --- PŘIDÁNÍ MODULŮ APPS DO DIST STRUKTURY ---
       - name: Příprava složky apps
         run: |
           mkdir -p dist/vlcr-kancelar/apps
@@ -60,37 +60,73 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 
-      # --- LINUX: Vytvoření stabilního archivu se všemi moduly a obrázky ---
-      - name: Zabalení pro Linux
+      # --- LINUX: Vytvoření plnohodnotných .deb a .rpm instalátorů ---
+      - name: Vytvoření Linux balíčků (.deb a .rpm)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          # Vytvoření .desktop zástupce pro systémové menu přímo v zabalené složce
-          cat << 'EOF' > dist/vlcr-kancelar/vlcr-kancelar.desktop
+          sudo apt-get update
+          sudo apt-get install -y ruby ruby-dev rubygems rpm
+          sudo gem install fpm
+
+          # Příprava systémové struktury pro instalaci
+          mkdir -p pkg_root/opt/vlcr-kancelar
+          mkdir -p pkg_root/usr/share/applications
+          mkdir -p pkg_root/usr/share/pixmaps
+
+          # Zkopírování celé zkompilované aplikace (včetně _internal s obrázky a složky apps)
+          cp -r dist/vlcr-kancelar/* pkg_root/opt/vlcr-kancelar/
+
+          # Vytvoření zástupce pro systémové menu
+          cat << 'EOF' > pkg_root/usr/share/applications/vlcr-kancelar.desktop
           [Desktop Entry]
           Name=VLČR Kancelář
           Comment=Kancelářský balík
-          Exec=./vlcr-kancelar
+          Exec=/opt/vlcr-kancelar/vlcr-kancelar
           Icon=vlcr-kancelar
           Type=Application
           Categories=Office;
           EOF
 
-          # Zabalení celé složky dist do čistého tar.gz archivu
-          tar -czvf vlcr-kancelar-linux.tar.gz -C dist vlcr-kancelar
+          # Přidání ikony do menu
+          if [ -f "images/VLCR_logo.png" ]; then
+            cp images/VLCR_logo.png pkg_root/usr/share/pixmaps/vlcr-kancelar.png
+          fi
 
-      # --- MACOS: Zabalení pro macOS ---
+          # 1. Sestavení .deb balíčku (pro Ubuntu/Debian)
+          fpm -s dir -t deb \
+            -n vlcr-kancelar \
+            -v 1.0.0 \
+            --architecture amd64 \
+            --category utils \
+            --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
+            --description "Kancelářský balík VLČR Kancelář" \
+            pkg_root/=/
+
+          # 2. Sestavení validního .rpm balíčku se SHA256 (pro openSUSE, Fedora)
+          fpm -s dir -t rpm \
+            -n vlcr-kancelar \
+            -v 1.0.0 \
+            --architecture x86_64 \
+            --rpm-digest sha256 \
+            --category Office \
+            --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
+            --description "Kancelářský balík VLČR Kancelář" \
+            pkg_root/=/
+
+      # --- MACOS ---
       - name: Zabalení pro macOS
         if: matrix.os == 'macos-latest'
         run: |
           tar -czvf vlcr-kancelar-macos.tar.gz -C dist .
 
-      # --- NAHRÁNÍ SOUBORŮ DO GITHUB RELEASES ---
+      # --- NAHRÁNÍ VŠECH INSTALÁTORŮ DO RELEASES ---
       - name: Nahrát soubory do GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           files: |
             vlcr_kancelar_windows_installer.exe
-            vlcr-kancelar-linux.tar.gz
+            vlcr-kancelar_1.0.0_amd64.deb
+            vlcr-kancelar-1.0.0-1.x86_64.rpm
             vlcr-kancelar-macos.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

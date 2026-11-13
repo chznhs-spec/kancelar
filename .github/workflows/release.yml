@@ -37,34 +37,32 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pillow PyQt5
 
-      # --- 1. SESTAVENÍ HLAVNÍ APLIKACE A MODULŮ ---
+      # --- 1. SESTAVENÍ HLAVNÍ APLIKACE A MODULŮ (V BASHI) ---
       - name: Sestavení hlavní aplikace (PyInstaller)
+        shell: bash
         run: |
           pyinstaller --noconsole --onedir -n vlcr-kancelar --add-data "images${{ matrix.os == 'windows-latest' && ';' || ':' }}images" main.py
 
       - name: Sestavení a přibalení vedlejších aplikací (Písař, Počítáč, Prezentář, Průzkumník)
+        shell: bash
         run: |
-          # Vytvoření složky apps uvnitř distribuční složky
           mkdir -p dist/vlcr-kancelar/apps
 
-          # Zkompilování jednotlivých modulů
-          pyinstaller --noconsole --onefile -n pisar pisar.py
-          pyinstaller --noconsole --onefile -n pocitar pocitar.py
-          pyinstaller --noconsole --onefile -n prezentar prezentar.py
-          pyinstaller --noconsole --onefile -n pruzkumnik pruzkumnik.py
+          pyinstaller --noconsole --onedir -n pisar pisar.py
+          pyinstaller --noconsole --onedir -n pocitar pocitar.py
+          pyinstaller --noconsole --onedir -n prezentar prezentar.py
+          pyinstaller --noconsole --onedir -n pruzkumnik pruzkumnik.py
 
-          # Zkopírování zkompilovaných souborů do složky apps/ dle platformy
-          if [ -f "dist/pisar" ]; then cp dist/pisar dist/vlcr-kancelar/apps/; fi
-          if [ -f "dist/pisar.exe" ]; then cp dist/pisar.exe dist/vlcr-kancelar/apps/; fi
-          
-          if [ -f "dist/pocitar" ]; then cp dist/pocitar dist/vlcr-kancelar/apps/; fi
-          if [ -f "dist/pocitar.exe" ]; then cp dist/pocitar.exe dist/vlcr-kancelar/apps/; fi
-          
-          if [ -f "dist/prezentar" ]; then cp dist/prezentar dist/vlcr-kancelar/apps/; fi
-          if [ -f "dist/prezentar.exe" ]; then cp dist/prezentar.exe dist/vlcr-kancelar/apps/; fi
-          
-          if [ -f "dist/pruzkumnik" ]; then cp dist/pruzkumnik dist/vlcr-kancelar/apps/; fi
-          if [ -f "dist/pruzkumnik.exe" ]; then cp dist/pruzkumnik.exe dist/vlcr-kancelar/apps/; fi
+          # Univerzální zkopírování bez ohledu na to, zda jde o adresář nebo soubor s .exe příponou
+          for app in pisar pocitar prezentar pruzkumnik; do
+            if [ -d "dist/$app" ]; then
+              cp -r dist/$app/* dist/vlcr-kancelar/apps/
+            elif [ -f "dist/$app" ]; then
+              cp dist/$app dist/vlcr-kancelar/apps/
+            elif [ -f "dist/$app.exe" ]; then
+              cp dist/$app.exe dist/vlcr-kancelar/apps/
+            fi
+          done
 
       # --- 2. WINDOWS: Inno Setup ---
       - name: Instalace Inno Setup (Windows)
@@ -92,10 +90,8 @@ jobs:
           mkdir -p pkg_root/usr/share/applications
           mkdir -p pkg_root/usr/share/pixmaps
 
-          # Zkopírování hotové struktury (hlavní app + images + apps/)
           cp -r dist/vlcr-kancelar/* pkg_root/opt/vlcr-kancelar/
 
-          # Vytvoření zástupce pro systémové menu Linuxu
           cat << 'EOF' > pkg_root/usr/share/applications/vlcr-kancelar.desktop
           [Desktop Entry]
           Name=VLČR Kancelář
@@ -110,17 +106,15 @@ jobs:
             cp images/VLCR_logo.png pkg_root/usr/share/pixmaps/vlcr-kancelar.png
           fi
 
-          # Sestavení .deb balíčku (Ubuntu/Debian)
           fpm -s dir -t deb \
             -n vlcr-kancelar \
             -v 1.1.0 \
             --architecture amd64 \
             --category utils \
             --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
-            --description "Kancelářský balík VLČR Kancelář - rozcestník a moduly" \
+            --description "Kancelářský balík VLČR Kancelář" \
             pkg_root/=/
 
-          # Sestavení .rpm balíčku se SHA256 (openSUSE / Fedora / YaST kompatibilní)
           fpm -s dir -t rpm \
             -n vlcr-kancelar \
             -v 1.1.0 \
@@ -128,7 +122,7 @@ jobs:
             --rpm-digest sha256 \
             --category Office \
             --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
-            --description "Kancelářský balík VLČR Kancelář - rozcestník a moduly" \
+            --description "Kancelářský balík VLČR Kancelář" \
             pkg_root/=/
 
       # --- 4. MACOS ---
@@ -152,7 +146,7 @@ jobs:
         with:
           files: |
             vlcr-kancelar_1.1.0_amd64.deb
-            vlcr-kancelar-1.1.0-1.x86_64.rpm
+            vlcr-kancelar_1.1.0-1.x86_64.rpm
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

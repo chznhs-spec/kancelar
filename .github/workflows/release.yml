@@ -37,18 +37,36 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pillow PyQt5
 
-      - name: Sestavení aplikace (PyInstaller)
+      # --- 1. SESTAVENÍ HLAVNÍ APLIKACE A MODULŮ ---
+      - name: Sestavení hlavní aplikace (PyInstaller)
         run: |
           pyinstaller --noconsole --onedir -n vlcr-kancelar --add-data "images${{ matrix.os == 'windows-latest' && ';' || ':' }}images" main.py
 
-      - name: Příprava složky apps
+      - name: Sestavení a přibalení vedlejších aplikací (Písař, Počítáč, Prezentář, Průzkumník)
         run: |
+          # Vytvoření složky apps uvnitř distribuční složky
           mkdir -p dist/vlcr-kancelar/apps
-          if [ -d "apps" ]; then
-            cp -r apps/* dist/vlcr-kancelar/apps/
-          fi
 
-      # --- WINDOWS: Inno Setup ---
+          # Zkompilování jednotlivých modulů
+          pyinstaller --noconsole --onefile -n pisar pisar.py
+          pyinstaller --noconsole --onefile -n pocitar pocitar.py
+          pyinstaller --noconsole --onefile -n prezentar prezentar.py
+          pyinstaller --noconsole --onefile -n pruzkumnik pruzkumnik.py
+
+          # Zkopírování zkompilovaných souborů do složky apps/ dle platformy
+          if [ -f "dist/pisar" ]; then cp dist/pisar dist/vlcr-kancelar/apps/; fi
+          if [ -f "dist/pisar.exe" ]; then cp dist/pisar.exe dist/vlcr-kancelar/apps/; fi
+          
+          if [ -f "dist/pocitar" ]; then cp dist/pocitar dist/vlcr-kancelar/apps/; fi
+          if [ -f "dist/pocitar.exe" ]; then cp dist/pocitar.exe dist/vlcr-kancelar/apps/; fi
+          
+          if [ -f "dist/prezentar" ]; then cp dist/prezentar dist/vlcr-kancelar/apps/; fi
+          if [ -f "dist/prezentar.exe" ]; then cp dist/prezentar.exe dist/vlcr-kancelar/apps/; fi
+          
+          if [ -f "dist/pruzkumnik" ]; then cp dist/pruzkumnik dist/vlcr-kancelar/apps/; fi
+          if [ -f "dist/pruzkumnik.exe" ]; then cp dist/pruzkumnik.exe dist/vlcr-kancelar/apps/; fi
+
+      # --- 2. WINDOWS: Inno Setup ---
       - name: Instalace Inno Setup (Windows)
         if: matrix.os == 'windows-latest'
         run: choco install innosetup -y
@@ -56,9 +74,13 @@ jobs:
       - name: Kompilace instalátoru (Windows)
         if: matrix.os == 'windows-latest'
         run: |
-          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
+          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
+          if (-not (Test-Path $iscc)) {
+              $iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          }
+          & $iscc setup.iss
 
-      # --- LINUX: Vytvoření .deb a .rpm balíčků ---
+      # --- 3. LINUX: Vytvoření .deb a .rpm balíčků ---
       - name: Vytvoření Linux balíčků (.deb a .rpm)
         if: matrix.os == 'ubuntu-latest'
         run: |
@@ -70,8 +92,10 @@ jobs:
           mkdir -p pkg_root/usr/share/applications
           mkdir -p pkg_root/usr/share/pixmaps
 
+          # Zkopírování hotové struktury (hlavní app + images + apps/)
           cp -r dist/vlcr-kancelar/* pkg_root/opt/vlcr-kancelar/
 
+          # Vytvoření zástupce pro systémové menu Linuxu
           cat << 'EOF' > pkg_root/usr/share/applications/vlcr-kancelar.desktop
           [Desktop Entry]
           Name=VLČR Kancelář
@@ -86,16 +110,34 @@ jobs:
             cp images/VLCR_logo.png pkg_root/usr/share/pixmaps/vlcr-kancelar.png
           fi
 
-          fpm -s dir -t deb -n vlcr-kancelar -v 1.1.0 --architecture amd64 --category utils --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" --description "Kancelářský balík VLČR Kancelář" pkg_root/=/
-          fpm -s dir -t rpm -n vlcr-kancelar -v 1.1.0 --architecture x86_64 --rpm-digest sha256 --category Office --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" --description "Kancelářský balík VLČR Kancelář" pkg_root/=/
+          # Sestavení .deb balíčku (Ubuntu/Debian)
+          fpm -s dir -t deb \
+            -n vlcr-kancelar \
+            -v 1.1.0 \
+            --architecture amd64 \
+            --category utils \
+            --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
+            --description "Kancelářský balík VLČR Kancelář - rozcestník a moduly" \
+            pkg_root/=/
 
-      # --- MACOS ---
+          # Sestavení .rpm balíčku se SHA256 (openSUSE / Fedora / YaST kompatibilní)
+          fpm -s dir -t rpm \
+            -n vlcr-kancelar \
+            -v 1.1.0 \
+            --architecture x86_64 \
+            --rpm-digest sha256 \
+            --category Office \
+            --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
+            --description "Kancelářský balík VLČR Kancelář - rozcestník a moduly" \
+            pkg_root/=/
+
+      # --- 4. MACOS ---
       - name: Zabalení pro macOS
         if: matrix.os == 'macos-latest'
         run: |
           tar -czvf vlcr-kancelar-macos.tar.gz -C dist .
 
-      # --- NAHRÁNÍ SOUBORŮ (Ošetřeno pro každý OS zvlášť) ---
+      # --- 5. NAHRÁNÍ VÝSTUPŮ DO GITHUB RELEASES ---
       - name: Nahrát Windows instalátor
         uses: softprops/action-gh-release@v2
         if: matrix.os == 'windows-latest'

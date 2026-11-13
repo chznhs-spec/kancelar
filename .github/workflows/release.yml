@@ -6,7 +6,7 @@ on:
       - 'v*' # Spustí se automaticky při vytvoření tagu, např. v1.0.0
 
 permissions:
-  contents: write # Oprávnění pro vytvoření release a nahrání souborů
+  contents: write
 
 jobs:
   build:
@@ -19,7 +19,7 @@ jobs:
           - os: windows-latest
             asset_name: vlcr_kancelar_windows_installer.exe
           - os: ubuntu-latest
-            asset_name: linux_packages
+            asset_name: vlcr-kancelar-linux.tar.gz
           - os: macos-latest
             asset_name: vlcr-kancelar-macos.tar.gz
 
@@ -37,9 +37,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install pyinstaller pillow PyQt5
 
-      - name: Sestavení aplikace (PyInstaller)
+      # --- SESTAVENÍ HLAVNÍ APLIKACE S OBRÁZKY ---
+      - name: Sestavení hlavní aplikace (PyInstaller)
         run: |
-          pyinstaller --noconsole --onedir -n vlcr-kancelar main.py
+          # Přidáme složku images do buildu (--add-data)
+          # Pro Windows se používá středník, pro Linux/macOS dvojtečka
+          pyinstaller --noconsole --onedir -n vlcr-kancelar --add-data "images${{ matrix.os == 'windows-latest' && ';' || ':' }}images" main.py
+
+      # --- DOPLNĚNÍ MODULŮ APPS DO DIST STRUKTURY ---
+      - name: Příprava složky apps
+        run: |
+          # Zajistíme, že složka apps existuje v dist/vlcr-kancelar/apps
+          mkdir -p dist/vlcr-kancelar/apps
+          if [ -d "apps" ]; then
+            cp -r apps/* dist/vlcr-kancelar/apps/
+          fi
 
       # --- WINDOWS: Inno Setup ---
       - name: Instalace Inno Setup (Windows)
@@ -51,58 +63,23 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" setup.iss
 
-      # --- LINUX: Vytvoření .deb i .rpm balíčků najednou ---
-      - name: Vytvoření Linux balíčků (.deb a .rpm)
+      # --- LINUX: Vytvoření stabilního archivu s podporou spuštění ---
+      - name: Zabalení pro Linux (openSUSE/Ubuntu)
         if: matrix.os == 'ubuntu-latest'
         run: |
-          # Instalace nástroje fpm a rpm balíčkovače
-          sudo apt-get update
-          sudo apt-get install -y ruby ruby-dev rubygems rpm
-          sudo gem install fpm
-
-          # Příprava struktury pro balíčky
-          mkdir -p pkg_root/opt/vlcr-kancelar
-          mkdir -p pkg_root/usr/share/applications
-          mkdir -p pkg_root/usr/share/pixmaps
-
-          # Zkopírování aplikace
-          cp -r dist/vlcr-kancelar/* pkg_root/opt/vlcr-kancelar/
-
-          # Vytvoření .desktop zástupce pro systémové menu
-          cat << 'EOF' > pkg_root/usr/share/applications/vlcr-kancelar.desktop
+          # Vytvoříme .desktop spouštěč přímo v archivu, aby se aplikace objevila v menu
+          cat << 'EOF' > dist/vlcr-kancelar/vlcr-kancelar.desktop
           [Desktop Entry]
           Name=VLČR Kancelář
           Comment=Kancelářský balík
-          Exec=/opt/vlcr-kancelar/vlcr-kancelar
+          Exec=./vlcr-kancelar
           Icon=vlcr-kancelar
           Type=Application
           Categories=Office;
           EOF
 
-          # Přidání ikony, pokud existuje
-          if [ -f "images/VLCR_logo.png" ]; then
-            cp images/VLCR_logo.png pkg_root/usr/share/pixmaps/vlcr-kancelar.png
-          fi
-
-          # 1. Sestavení .deb balíčku (pro Ubuntu/Debian)
-          fpm -s dir -t deb \
-            -n vlcr-kancelar \
-            -v 1.0.0 \
-            --architecture amd64 \
-            --category utils \
-            --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
-            --description "Kancelářský balík VLČR Kancelář" \
-            pkg_root/=/
-
-          # 2. Sestavení .rpm balíčku (pro openSUSE, Fedora, RHEL)
-          fpm -s dir -t rpm \
-            -n vlcr-kancelar \
-            -v 1.0.0 \
-            --architecture x86_64 \
-            --category Office \
-            --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
-            --description "Kancelářský balík VLČR Kancelář" \
-            pkg_root/=/
+          # Zabalíme celou složku dist do čistého tar.gz
+          tar -czvf vlcr-kancelar-linux.tar.gz -C dist vlcr-kancelar
 
       # --- MACOS ---
       - name: Zabalení pro macOS
@@ -110,14 +87,13 @@ jobs:
         run: |
           tar -czvf vlcr-kancelar-macos.tar.gz -C dist .
 
-      # --- NAHRÁNÍ VŠECH SOUBORŮ DO RELEASES ---
+      # --- NAHRÁNÍ DO RELEASES ---
       - name: Nahrát soubory do GitHub Releases
         uses: softprops/action-gh-release@v2
         with:
           files: |
             vlcr_kancelar_windows_installer.exe
-            vlcr-kancelar_1.0.0_amd64.deb
-            vlcr-kancelar-1.0.0-1.x86_64.rpm
+            vlcr-kancelar-linux.tar.gz
             vlcr-kancelar-macos.tar.gz
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

@@ -1,0 +1,43 @@
+VLCR CONTAINER FORMAT - VERSION 1.0
+==================================
+
+File layout:
+  64-byte fixed header | UTF-8 JSON metadata | payload bytes
+
+All integers are unsigned big-endian.
+
+Header struct: >4sBBH4sIQQ32s
+  Offset  Size  Field
+  0       4     magic = ASCII "VLCR"
+  4       1     major = 1
+  5       1     minor = 0
+  6       2     flags (bit 0 = zlib-compressed payload; others reserved)
+  8       4     FourCC type code
+  12      4     metadata length
+  16      8     stored payload length
+  24      8     original/uncompressed payload length
+  32      32    SHA-256 of original/uncompressed payload
+
+Metadata is a UTF-8 JSON object with required string fields:
+  media_type    MIME type of payload
+  original_name original basename, not a path
+
+Recommended metadata fields:
+  format = "VLCR"
+  metadata_version = 1
+  created_utc = ISO-8601 UTC timestamp
+
+Payload starts immediately after metadata. If flag bit 0 is set, payload
+is zlib-compressed. SHA-256 is checked against the decompressed bytes.
+
+FourCC values in v1.0:
+  PNG , JPEG, GIF , WEBP, BMP , SVG , HTML, TEXT, CSS , JS  , JSON, PDF , ZIP , DATA
+
+Unknown MIME types use DATA; exact MIME type remains in metadata.
+
+Readers must reject unsupported major versions, unknown flags, inconsistent
+lengths, invalid metadata, decompression failures, output-length mismatches,
+and SHA-256 mismatches. Readers must not use original_name as a filesystem path.
+
+This is a single-payload container format, not a filesystem, archive, encryption
+scheme, or access-control mechanism.

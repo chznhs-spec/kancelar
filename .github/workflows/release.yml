@@ -5,6 +5,9 @@ on:
     tags:
       - 'v*' # Spustí se automaticky při vytvoření tagu, např. v1.0.0
 
+permissions:
+  contents: write  # Toto povoluje vytváření releases a nahrávání souborů
+
 jobs:
   build:
     name: Build for ${{ matrix.os }}

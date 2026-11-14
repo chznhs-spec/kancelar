@@ -82,3 +82,23 @@ coll = COLLECT(
     upx=False,
     name="vlcr-kancelar",
 )
+
+
+# macOS: zabalení do aplikace "VLCR Kancelar.app".
+# Všechny programy sady leží uvnitř Contents/MacOS vedle sebe; hlavní je vlcr-kancelar.
+if sys.platform == "darwin":
+    icns = os.path.join(SPECPATH, "build_icons", "vlcr-kancelar.icns")
+    app = BUNDLE(
+        coll,
+        name="VLCR Kancelar.app",
+        icon=icns if os.path.isfile(icns) else None,
+        bundle_identifier="cz.vlcr.kancelar",
+        info_plist={
+            "CFBundleName": "VLČR Kancelář",
+            "CFBundleDisplayName": "VLČR Kancelář",
+            "CFBundleShortVersionString": os.environ.get("VLCR_VERSION", "0.0.0"),
+            "CFBundleVersion": os.environ.get("VLCR_VERSION", "0.0.0"),
+            "NSHighResolutionCapable": True,
+            "LSMinimumSystemVersion": "11.0",
+        },
+    )

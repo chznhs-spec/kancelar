@@ -165,7 +165,9 @@ jobs:
         run: |
           set -euo pipefail
           VERSION="${{ steps.ver.outputs.version }}"
-          RPM_VERSION="${VERSION//-/~}"
+          # RPM nesmí mít ve verzi pomlčku: pre-release (1.2.0-beta) se zapisuje s tildou (1.2.0~beta).
+          # Záměrně přes tr - zápis ${VERSION//-/~} by bash rozvinul na domovský adresář.
+          RPM_VERSION="$(printf '%s' "$VERSION" | tr '-' '~')"
           mkdir -p rpmbuild/BUILD rpmbuild/RPMS rpmbuild/SOURCES rpmbuild/SPECS rpmbuild/SRPMS icons
 
           cp_icon() { if [ -f "$1" ]; then cp "$1" "icons/$2"; else cp images/VLCR_logo.png "icons/$2"; fi; }

@@ -198,7 +198,8 @@ jobs:
 
           ls -la rpmbuild/RPMS/x86_64/
           rpm -qip rpmbuild/RPMS/x86_64/*.rpm
-          rpm -qlp rpmbuild/RPMS/x86_64/*.rpm | head -40
+          rpm -qlp rpmbuild/RPMS/x86_64/*.rpm > rpm-obsah.txt
+          head -40 rpm-obsah.txt
 
       - name: Uložit .rpm
         uses: actions/upload-artifact@v4
@@ -320,7 +321,8 @@ jobs:
 
           dpkg-deb --build --root-owner-group "$R" "vlcr-kancelar_${DEB_VERSION}_amd64.deb"
           dpkg-deb -I vlcr-kancelar_*_amd64.deb
-          dpkg-deb -c vlcr-kancelar_*_amd64.deb | head -30
+          dpkg-deb -c vlcr-kancelar_*_amd64.deb > deb-obsah.txt
+          head -30 deb-obsah.txt
 
       - name: Uložit .deb
         uses: actions/upload-artifact@v4

@@ -99,12 +99,12 @@ VIEW_TILES, VIEW_LIST = "tiles", "list"
 DEFAULT_VIEW = VIEW_TILES
 
 # barvy dlaždic
-FOLDER_COLOR = "#4A412A"
+FOLDER_COLOR = "#EB8B37"
 INVALID_COLOR = "#949494"
 APP_COLORS = {
-    "pisar": "#4A6217",
-    "prezentar": "#1100FF",
-    "pocitar": "#6A3B11",
+    "pisar": "#00A300",
+    "prezentar": "#2D89EF",
+    "pocitar": "#DA532C",
 }
 
 
@@ -968,6 +968,9 @@ class ExplorerWindow(QMainWindow):
         self.resize(940, 580)
         self.setMinimumSize(760, 480)
         self.setStyleSheet(f"QMainWindow {{ background-color: {BG_COLOR}; }}")
+        icon_path = os.path.join(BASE_DIR, "loga", "otevrit_soubor.png")
+        if os.path.isfile(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         root = QWidget()
         self.setCentralWidget(root)

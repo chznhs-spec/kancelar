@@ -99,7 +99,7 @@ VIEW_TILES, VIEW_LIST = "tiles", "list"
 DEFAULT_VIEW = VIEW_TILES
 
 # barvy dlaždic
-FOLDER_COLOR = "#EB8B37"
+FOLDER_COLOR = "#F0A30A"
 INVALID_COLOR = "#949494"
 APP_COLORS = {
     "pisar": "#00A300",
@@ -1001,6 +1001,10 @@ if __name__ == "__main__":
         sys.exit(0)
     app = QApplication(sys.argv)
     app.setFont(QFont("Segoe UI", 9))
+    app.setDesktopFileName("vlcr-pruzkumnik")      # Linux: shoda s vlcr-pruzkumnik.desktop (ikona na panelu)
+    _icon = os.path.join(BASE_DIR, "loga", "otevrit_soubor.png")
+    if os.path.isfile(_icon):
+        app.setWindowIcon(QIcon(_icon))
     window = ExplorerWindow()
     window.show()
     sys.exit(app.exec_())

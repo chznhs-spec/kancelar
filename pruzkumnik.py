@@ -102,9 +102,9 @@ DEFAULT_VIEW = VIEW_TILES
 FOLDER_COLOR = "#4A412A"
 INVALID_COLOR = "#949494"
 APP_COLORS = {
-    "pisar": "#00A300",
-    "prezentar": "#4F6809",
-    "pocitar": "#DA532C",
+    "pisar": "#4A6217",
+    "prezentar": "#1100FF",
+    "pocitar": "#6A3B11",
 }
 
 
@@ -262,7 +262,12 @@ def launch_vlcr(path, parent=None, base_dir=None):
                                 f"Aplikace {title} zatím není nainstalována nebo nastavena.")
         return False
     try:
-        subprocess.Popen(cmd, cwd=os.path.dirname(cmd[0]) if getattr(sys, "frozen", False) else base_dir)
+        frozen = getattr(sys, "frozen", False)
+        env = os.environ.copy()
+        if frozen:
+            # jinak by se nový zabalený program tvářil jako potomek tohoto procesu (PyInstaller >= 6.9)
+            env["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+        subprocess.Popen(cmd, cwd=os.path.dirname(cmd[0]) if frozen else base_dir, env=env)
         return True
     except Exception as e:
         QMessageBox.warning(parent, "Aplikaci se nepodařilo spustit", f"{title}: {e}")

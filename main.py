@@ -1,4 +1,3 @@
-
 import sys
 import os
 import subprocess
@@ -74,12 +73,74 @@ FOOTER_BG = "#2D2D2D"
 OPEN_COLOR = "#949494"
 
 FOOTER_HEIGHT = 28
-COPYRIGHT_TEXT = "© 2026 VLČR"
+COPYRIGHT_TEXT = "© 2026, Vzdělaný lid České republiky. Všechna práva vyhrazena."
 
 BASE_DIR = application_dir()
 
 # Ikona zabalená v PyInstalleru
 APP_ICON_PATH = resource_path("loga/cervena.png")
+
+
+# ============================================================
+# SPOUŠTĚNÍ PROGRAMŮ SADY
+# ============================================================
+
+def find_program(key, dev_script):
+    """
+    Vrátí příkaz ke spuštění programu sady.
+
+    Nainstalovaná (zabalená) verze:
+        spustitelný soubor <key>(.exe) vedle hlavního programu
+        (pro jistotu i ve složce apps/)
+
+    Vývojová verze:
+        python <dev_script> ze složky s main.py
+    """
+
+    base = application_dir()
+
+    if getattr(sys, "frozen", False):
+        executable = key + (".exe" if os.name == "nt" else "")
+
+        for folder in (base, os.path.join(base, "apps")):
+            candidate = os.path.join(folder, executable)
+
+            if os.path.isfile(candidate):
+                return [candidate]
+
+        raise FileNotFoundError(os.path.join(base, executable))
+
+    script_path = os.path.join(base, dev_script)
+
+    if not os.path.isfile(script_path):
+        raise FileNotFoundError(script_path)
+
+    return [sys.executable, script_path]
+
+
+def start_program(key, dev_script):
+    """Spustí program sady jako samostatný proces."""
+
+    command = find_program(key, dev_script)
+    frozen = getattr(sys, "frozen", False)
+
+    environment = os.environ.copy()
+
+    if frozen:
+        # Bez tohoto by se nově spuštěný zabalený program (PyInstaller >= 6.9)
+        # choval jako potomek rozcestníku a otevřel by místo sebe znovu rozcestník.
+        environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+
+    options = {
+        "cwd": os.path.dirname(command[0]) if frozen else application_dir(),
+        "env": environment,
+    }
+
+    if os.name != "nt":
+        # program přežije zavření rozcestníku
+        options["start_new_session"] = True
+
+    subprocess.Popen(command, **options)
 
 
 # ============================================================
@@ -466,7 +527,7 @@ class VlcrDashboard(QMainWindow):
     # --------------------------------------------------------
 
     def launch_app(self, key):
-        """Spustí příslušnou aplikaci VLČR."""
+        """Spustí příslušnou aplikaci VLČR (Písař, Prezentář, Počítář)."""
 
         app_info = next(
             (app for app in APPS if app[0] == key),
@@ -482,38 +543,7 @@ class VlcrDashboard(QMainWindow):
             return
 
         try:
-            if getattr(sys, "frozen", False):
-                # Zabalená verze
-                extension = ".exe" if os.name == "nt" else ""
-
-                executable = os.path.join(
-                    self.base_dir,
-                    "apps",
-                    key + extension
-                )
-
-                if not os.path.isfile(executable):
-                    raise FileNotFoundError(executable)
-
-                subprocess.Popen(
-                    [executable],
-                    cwd=self.base_dir
-                )
-
-            else:
-                # Vývojová verze
-                script_path = os.path.join(
-                    self.base_dir,
-                    app_info[4]
-                )
-
-                if not os.path.isfile(script_path):
-                    raise FileNotFoundError(script_path)
-
-                subprocess.Popen(
-                    [sys.executable, script_path],
-                    cwd=self.base_dir
-                )
+            start_program(key, app_info[4])
 
         except Exception as error:
             QMessageBox.critical(
@@ -523,41 +553,10 @@ class VlcrDashboard(QMainWindow):
             )
 
     def open_explorer(self):
-        """Spustí Průzkumník souborů."""
+        """Spustí Průzkumník souborů VLČR."""
 
         try:
-            if getattr(sys, "frozen", False):
-                # Zabalená verze
-                extension = ".exe" if os.name == "nt" else ""
-
-                executable = os.path.join(
-                    self.base_dir,
-                    "apps",
-                    "pruzkumnik" + extension
-                )
-
-                if not os.path.isfile(executable):
-                    raise FileNotFoundError(executable)
-
-                subprocess.Popen(
-                    [executable],
-                    cwd=self.base_dir
-                )
-
-            else:
-                # Vývojová verze
-                script_path = os.path.join(
-                    self.base_dir,
-                    "pruzkumnik.py"
-                )
-
-                if not os.path.isfile(script_path):
-                    raise FileNotFoundError(script_path)
-
-                subprocess.Popen(
-                    [sys.executable, script_path],
-                    cwd=self.base_dir
-                )
+            start_program("pruzkumnik", "pruzkumnik.py")
 
         except Exception as error:
             QMessageBox.critical(

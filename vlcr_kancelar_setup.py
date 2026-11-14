@@ -1,38 +1,58 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""Plně funkční instalátor "VLČR Kancelář" (chytré hledání zdrojových složek).
+"""Instalátor sady "VLČR Kancelář".
 
-Spuštěno z umístění skriptu.
+Je to jediný soubor, který si uživatel stáhne. V sobě nese (payload.zip) celou sadu:
+rozcestník, Písař, Počítář, Prezentář a Průzkumník. Instalátor je nakopíruje do počítače,
+vytvoří zástupce a (ve Windows) záznam pro Odinstalaci programů.
+
+payload.zip vytváří GitHub Actions (viz .github/workflows/release.yml).
+Pro vývoj bez payload.zip stačí mít vedle skriptu složku dist/vlcr-kancelar.
 """
+import base64
+import math
 import os
-import sys
 import shutil
 import subprocess
-import math
+import sys
+import threading
 import tkinter as tk
+import zipfile
 from tkinter import filedialog, messagebox, ttk
 
+
 def resource_path(relative_path):
-    """ Vrátí správnou cestu k souboru jak pro skript, tak pro PyInstaller exe """
+    """Cesta k přibalenému souboru - funguje ve skriptu i v PyInstaller exe."""
     try:
         base_path = sys._MEIPASS
     except Exception:
         base_path = os.path.dirname(os.path.abspath(__file__))
     return os.path.join(base_path, relative_path)
 
+
 APP_NAME = "VLČR Kancelář"
 APP_VERSION = "1.0.0"
 PUBLISHER = "Vzdělaný lid ČR"
+APP_KEY = "VLCRKancelar"            # název klíče v registru (Odinstalace programů)
+MAIN_EXE = "vlcr-kancelar.exe" if sys.platform == "win32" else "vlcr-kancelar"
 
-# Zjištění správného adresáře, ať už běží skript, nebo kompilovaný .exe
-if getattr(sys, 'frozen', False):
+if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(os.path.abspath(sys.executable))
 else:
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-# Cesty k lokálním souborům grafiky pomocí resource_path
 LOGO_PATH = resource_path(os.path.join("images", "VLCR_logo.png"))
 BG_PATH = resource_path(os.path.join("images", "win72.png"))
+PAYLOAD_ZIP = resource_path("payload.zip")
+
+# Programy sady: (název zástupce, spustitelný soubor)
+PROGRAMS = [
+    (APP_NAME, "vlcr-kancelar.exe"),
+    ("Písař", "pisar.exe"),
+    ("Počítář", "pocitar.exe"),
+    ("Prezentář", "prezentar.exe"),
+    ("Průzkumník souborů", "pruzkumnik.exe"),
+]
 
 WIDTH, HEIGHT = 503, 392
 BODY_BG = "#f0f0f0"
@@ -43,17 +63,11 @@ FONT = ("Segoe UI", 9)
 FONT_B = ("Segoe UI", 9, "bold")
 FONT_TITLE = ("Segoe UI", 12, "bold")
 
-# Položky, které se mají zkopírovat
-ITEMS_TO_COPY = [
-    "vlcr-kancelar",
-    "apps"
-]
-
 LICENSE_TEXT = (
     "LICENČNÍ SMLOUVA K PROGRAMU %s\n\n"
     "1. Úvodní ustanovení\n"
     "Tato licenční smlouva upravuje podmínky používání kancelářského balíku %s "
-    "(zahrnujícího moduly Hlavní rozcestník, Průzkumník, Písař a Prezentář) "
+    "(zahrnujícího moduly Hlavní rozcestník, Průzkumník, Písař, Počítář a Prezentář) "
     "poskytovaného společností %s.\n\n"
     "2. Rozsah licence\n"
     "Uživateli se uděluje nevýhradní, nepřenositelná licence k používání Programu na jednom "
@@ -73,6 +87,160 @@ def default_dir():
     return os.path.join(base, APP_NAME)
 
 
+# ---------------------------------------------------------------------------
+# Instalační data (payload)
+# ---------------------------------------------------------------------------
+class Payload:
+    """Obsah, který se instaluje: payload.zip (hotový instalátor) nebo složka dist/vlcr-kancelar (vývoj)."""
+
+    def __init__(self, zip_path=PAYLOAD_ZIP, dir_candidates=None):
+        self.zip_path = zip_path if zip_path and os.path.isfile(zip_path) else None
+        self.dir_path = None
+        if not self.zip_path:
+            for cand in dir_candidates or (os.path.join(BASE_DIR, "dist", "vlcr-kancelar"),
+                                           os.path.join(BASE_DIR, "vlcr-kancelar")):
+                if os.path.isdir(cand):
+                    self.dir_path = cand
+                    break
+
+    @property
+    def available(self):
+        return bool(self.zip_path or self.dir_path)
+
+    def items(self):
+        """Seznam (relativní cesta, velikost) všech souborů."""
+        if self.zip_path:
+            with zipfile.ZipFile(self.zip_path) as z:
+                return [(i.filename, i.file_size) for i in z.infolist() if not i.is_dir()]
+        out = []
+        for root, _, files in os.walk(self.dir_path):
+            for f in files:
+                p = os.path.join(root, f)
+                out.append((os.path.relpath(p, self.dir_path).replace(os.sep, "/"), os.path.getsize(p)))
+        return out
+
+    def total_size(self):
+        return sum(size for _, size in self.items())
+
+    @staticmethod
+    def _safe_target(dest, rel):
+        target = os.path.normpath(os.path.join(dest, *rel.split("/")))
+        root = os.path.normpath(dest)
+        if target != root and not target.startswith(root + os.sep):
+            raise ValueError("Neplatná cesta v instalačních datech: %s" % rel)
+        return target
+
+    def extract(self, dest, progress):
+        """Rozbalí všechny soubory do dest. progress(hotovo_bajtů, celkem_bajtů, název)."""
+        if not self.available:
+            raise RuntimeError("Instalační data (payload.zip) nebyla nalezena.")
+        items = self.items()
+        total = max(1, sum(size for _, size in items))
+        done = 0
+        zf = zipfile.ZipFile(self.zip_path) if self.zip_path else None
+        try:
+            for rel, size in items:
+                target = self._safe_target(dest, rel)
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                if zf:
+                    with zf.open(rel) as src, open(target, "wb") as out:
+                        shutil.copyfileobj(src, out, 1024 * 1024)
+                    mode = (zf.getinfo(rel).external_attr >> 16) & 0o777
+                    if mode and os.name != "nt":
+                        os.chmod(target, mode)
+                else:
+                    shutil.copy2(os.path.join(self.dir_path, *rel.split("/")), target)
+                done += size
+                progress(done, total, rel)
+        finally:
+            if zf:
+                zf.close()
+
+
+# ---------------------------------------------------------------------------
+# Windows: zástupci, odinstalace, registr
+# ---------------------------------------------------------------------------
+CREATE_NO_WINDOW = 0x08000000
+
+
+def _q(text):
+    """Text do jednoduchých uvozovek PowerShellu."""
+    return text.replace("'", "''")
+
+
+def run_powershell(script):
+    encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+    subprocess.run(
+        ["powershell.exe", "-NoProfile", "-ExecutionPolicy", "Bypass", "-EncodedCommand", encoded],
+        check=True, creationflags=CREATE_NO_WINDOW, timeout=120)
+
+
+def build_shortcut_script(dest, desktop):
+    lines = [
+        "$ErrorActionPreference = 'Stop'",
+        "$ws = New-Object -ComObject WScript.Shell",
+        "$menu = Join-Path ([Environment]::GetFolderPath('CommonPrograms')) '%s'" % _q(APP_NAME),
+        "New-Item -ItemType Directory -Force -Path $menu | Out-Null",
+    ]
+    for label, exe in PROGRAMS:
+        target = os.path.join(dest, exe)
+        lines.append(
+            "$s = $ws.CreateShortcut((Join-Path $menu '%s.lnk')); $s.TargetPath = '%s'; "
+            "$s.WorkingDirectory = '%s'; $s.IconLocation = '%s'; $s.Save()"
+            % (_q(label), _q(target), _q(dest), _q(target)))
+    if desktop:
+        target = os.path.join(dest, MAIN_EXE)
+        lines.append(
+            "$s = $ws.CreateShortcut((Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) '%s.lnk')); "
+            "$s.TargetPath = '%s'; $s.WorkingDirectory = '%s'; $s.IconLocation = '%s'; $s.Save()"
+            % (_q(APP_NAME), _q(target), _q(dest), _q(target)))
+    return "\n".join(lines)
+
+
+UNINSTALL_PS1 = r"""$ErrorActionPreference = 'SilentlyContinue'
+$dir = Split-Path -Parent $PSCommandPath
+$principal = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    Start-Process -FilePath 'powershell.exe' -Verb RunAs -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', ('"' + $PSCommandPath + '"'))
+    exit
+}
+Add-Type -AssemblyName System.Windows.Forms
+$answer = [System.Windows.Forms.MessageBox]::Show('Opravdu chcete odinstalovat @@NAME@@?', 'Odinstalace', [System.Windows.Forms.MessageBoxButtons]::YesNo, [System.Windows.Forms.MessageBoxIcon]::Question)
+if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { exit }
+Get-Process | Where-Object { $_.Path -and $_.Path.StartsWith($dir, [System.StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force
+Start-Sleep -Milliseconds 700
+Remove-Item -Recurse -Force (Join-Path ([Environment]::GetFolderPath('CommonPrograms')) '@@NAME@@')
+Remove-Item -Force (Join-Path ([Environment]::GetFolderPath('CommonDesktopDirectory')) '@@NAME@@.lnk')
+Remove-Item -Recurse -Force 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\@@KEY@@'
+[System.Windows.Forms.MessageBox]::Show('@@NAME@@ byl odinstalován.', 'Odinstalace') | Out-Null
+Start-Process -FilePath 'cmd.exe' -WindowStyle Hidden -ArgumentList '/c', ('timeout /t 2 /nobreak >nul & rmdir /s /q "' + $dir + '"')
+"""
+
+
+def uninstall_script_text():
+    return UNINSTALL_PS1.replace("@@NAME@@", _q(APP_NAME)).replace("@@KEY@@", APP_KEY)
+
+
+def register_uninstall(dest, size_bytes):
+    import winreg
+    key_path = r"SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\%s" % APP_KEY
+    uninstall_cmd = ('powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%s"'
+                     % os.path.join(dest, "uninstall.ps1"))
+    with winreg.CreateKeyEx(winreg.HKEY_LOCAL_MACHINE, key_path, 0,
+                            winreg.KEY_WRITE | winreg.KEY_WOW64_64KEY) as key:
+        for name, value in (("DisplayName", APP_NAME), ("DisplayVersion", APP_VERSION),
+                            ("Publisher", PUBLISHER), ("InstallLocation", dest),
+                            ("DisplayIcon", os.path.join(dest, MAIN_EXE)),
+                            ("UninstallString", uninstall_cmd)):
+            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, value)
+        winreg.SetValueEx(key, "EstimatedSize", 0, winreg.REG_DWORD, int(size_bytes // 1024))
+        winreg.SetValueEx(key, "NoModify", 0, winreg.REG_DWORD, 1)
+        winreg.SetValueEx(key, "NoRepair", 0, winreg.REG_DWORD, 1)
+
+
+# ---------------------------------------------------------------------------
+# Okno instalátoru
+# ---------------------------------------------------------------------------
 class Setup(tk.Tk):
     def __init__(self):
         super().__init__()
@@ -94,14 +262,16 @@ class Setup(tk.Tk):
 
         self.page = None
         self.after_id = None
+        self.payload = Payload()
         self.dest = tk.StringVar(value=default_dir())
         self.accept = tk.IntVar(value=0)
         self.launch = tk.IntVar(value=1)
+        self.desktop_icon = tk.IntVar(value=1)
+        self.state = {"percent": 0, "file": "", "done": False, "error": None, "warnings": []}
 
         self._refs = []
         self._load_local_images()
 
-        # Rozvržení okna
         self.header = tk.Frame(self, bg=WHITE, height=58)
         self.h_title = tk.Label(self.header, bg=WHITE, font=FONT_B, anchor="w")
         self.h_title.place(x=14, y=10)
@@ -125,6 +295,7 @@ class Setup(tk.Tk):
 
         self.goto("welcome")
 
+    # --- obrázky -------------------------------------------------------------
     def _load_local_images(self):
         self._logo_full = None
         if os.path.exists(LOGO_PATH):
@@ -137,23 +308,14 @@ class Setup(tk.Tk):
         if os.path.exists(BG_PATH):
             try:
                 from PIL import Image, ImageTk
-                pil_img = Image.open(BG_PATH)
-                self._bg_full = ImageTk.PhotoImage(pil_img)
+                self._bg_full = ImageTk.PhotoImage(Image.open(BG_PATH))
             except ImportError:
                 try:
                     self._bg_full = tk.PhotoImage(file=BG_PATH)
                 except Exception:
                     pass
-
-    def logo_into(self, label, mw, mh):
-        if self._logo_full is None:
-            label.configure(text="VLČR", fg=ACCENT, font=("Segoe UI", 11, "bold"), image="")
-            return
-        img = self._logo_full
-        f = max(math.ceil(img.width() / mw), math.ceil(img.height() / mh), 1)
-        small = img.subsample(f, f) if f > 1 else img
-        self._refs.append(small)
-        label.configure(image=small, text="")
+            except Exception:
+                pass
 
     def scaled_logo(self, mw, mh):
         if self._logo_full is None:
@@ -164,6 +326,14 @@ class Setup(tk.Tk):
         self._refs.append(small)
         return small
 
+    def logo_into(self, label, mw, mh):
+        small = self.scaled_logo(mw, mh)
+        if small is None:
+            label.configure(text="VLČR", fg=ACCENT, font=("Segoe UI", 11, "bold"), image="")
+        else:
+            label.configure(image=small, text="")
+
+    # --- rozvržení a navigace ----------------------------------------------
     def layout(self, with_header, body_bg):
         for w in (self.header, self.h_line, self.content, self.sep, self.bar):
             w.pack_forget()
@@ -200,8 +370,10 @@ class Setup(tk.Tk):
     def next(self):
         if self.page == "finish":
             self.finish()
-        else:
-            self.goto(self.ORDER[self.ORDER.index(self.page) + 1])
+            return
+        if self.page == "folder" and not self.validate_folder():
+            return
+        self.goto(self.ORDER[self.ORDER.index(self.page) + 1])
 
     def back(self):
         self.goto(self.ORDER[self.ORDER.index(self.page) - 1])
@@ -210,29 +382,33 @@ class Setup(tk.Tk):
         if self.page == "finish":
             self.finish()
             return
-        if messagebox.askyesno("Ukončit instalaci", "Opravdu chcete ukončit instalaci sady %s?" % APP_NAME, icon="question"):
-            if self.after_id is not None:
-                self.after_cancel(self.after_id)
+        if self.page == "installing":
+            messagebox.showinfo("Instalace probíhá", "Počkejte prosím na dokončení instalace.")
+            return
+        if messagebox.askyesno("Ukončit instalaci", "Opravdu chcete ukončit instalaci sady %s?" % APP_NAME,
+                               icon="question"):
             self.destroy()
 
     def finish(self):
+        if self.page == "finish" and self.state["warnings"]:
+            messagebox.showwarning("Upozornění", "Instalace proběhla, ale některé kroky se nepodařily:\n\n"
+                                   + "\n".join(self.state["warnings"]))
         if self.launch.get() and self.page == "finish":
-            target_dir = self.dest.get()
-            exe_name = "vlcr-kancelar.exe" if sys.platform == "win32" else "vlcr-kancelar"
-            main_path = os.path.join(target_dir, exe_name)
-            
+            main_path = os.path.join(self.dest.get(), MAIN_EXE)
             if os.path.exists(main_path):
                 try:
                     if sys.platform == "win32":
-                        subprocess.Popen([main_path])
+                        # přes Průzkumníka, aby se program nespustil s právy správce
+                        subprocess.Popen(["explorer.exe", main_path])
                     elif sys.platform == "darwin":
                         subprocess.Popen(["open", main_path])
                     else:
                         subprocess.Popen([main_path])
                 except Exception as e:
-                    print(f"Nelze spustit aplikaci: {e}")
+                    print("Nelze spustit aplikaci: %s" % e)
         self.destroy()
 
+    # --- stránky ---------------------------------------------------------------
     def side_page(self, title, text):
         self.layout(False, WHITE)
         c = self.content
@@ -250,7 +426,8 @@ class Setup(tk.Tk):
 
         right = tk.Frame(c, bg=WHITE)
         right.pack(side="left", fill="both", expand=True, padx=(18, 14), pady=(18, 0))
-        tk.Label(right, text=title, bg=WHITE, font=FONT_TITLE, justify="left", wraplength=290, anchor="w").pack(anchor="w", pady=(0, 18))
+        tk.Label(right, text=title, bg=WHITE, font=FONT_TITLE, justify="left", wraplength=290,
+                 anchor="w").pack(anchor="w", pady=(0, 18))
         tk.Label(right, text=text, bg=WHITE, justify="left", wraplength=300, anchor="w").pack(anchor="w")
         return right
 
@@ -274,7 +451,8 @@ class Setup(tk.Tk):
         inner = tk.Frame(box, bg=WHITE)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
         sb = ttk.Scrollbar(inner, orient="vertical")
-        txt = tk.Text(inner, wrap="word", bg=WHITE, relief="flat", bd=0, padx=6, pady=4, height=8, font=FONT, yscrollcommand=sb.set)
+        txt = tk.Text(inner, wrap="word", bg=WHITE, relief="flat", bd=0, padx=6, pady=4, height=8, font=FONT,
+                      yscrollcommand=sb.set)
         sb.configure(command=txt.yview)
         sb.pack(side="right", fill="y")
         txt.pack(side="left", fill="both", expand=True)
@@ -283,118 +461,166 @@ class Setup(tk.Tk):
         self.accept.set(0)
         for val, label in ((1, "Souhlasím s podmínkami smlouvy"), (0, "Nesouhlasím s podmínkami smlouvy")):
             tk.Radiobutton(c, text=label, variable=self.accept, value=val, bg=BODY_BG,
-                           activebackground=BODY_BG, command=self.license_changed, anchor="w").pack(anchor="w", padx=14, pady=(4 if val else 0, 0))
+                           activebackground=BODY_BG, command=self.license_changed,
+                           anchor="w").pack(anchor="w", padx=14, pady=(4 if val else 0, 0))
         tk.Frame(c, bg=BODY_BG, height=6).pack()
         self.buttons(next_on=False)
 
     def license_changed(self):
         self.btn_next.configure(state="normal" if self.accept.get() else "disabled")
 
+    def required_mb(self):
+        try:
+            return max(1, int(self.payload.total_size() * 1.1 / (1024 * 1024)))
+        except Exception:
+            return 0
+
     def page_folder(self):
         self.layout(True, BODY_BG)
         self.set_header("Vyberte cílové umístění", "Kam má být sada %s nainstalována?" % APP_NAME)
         c = self.content
         tk.Label(c, bg=BODY_BG, justify="left", wraplength=470, anchor="w",
-                 text="Průvodce nainstaluje balík %s do následující složky." % APP_NAME).pack(anchor="w", padx=14, pady=(14, 8))
+                 text="Průvodce nainstaluje balík %s do následující složky." % APP_NAME).pack(anchor="w", padx=14,
+                                                                                            pady=(14, 8))
         row = tk.Frame(c, bg=BODY_BG)
         row.pack(fill="x", padx=14, pady=14)
         ttk.Entry(row, textvariable=self.dest).pack(side="left", fill="x", expand=True, ipady=2)
         ttk.Button(row, text="Procházet…", command=self.browse).pack(side="left", padx=(8, 0))
-        tk.Label(c, bg=BODY_BG, anchor="w", text="Potřebujete alespoň 65,0 MB volného místa na disku.").pack(side="bottom", anchor="w", padx=14, pady=14)
+        if sys.platform == "win32":
+            tk.Checkbutton(c, text="Vytvořit zástupce na ploše", variable=self.desktop_icon, bg=BODY_BG,
+                           activebackground=BODY_BG, anchor="w").pack(anchor="w", padx=14)
+        need = self.required_mb()
+        tk.Label(c, bg=BODY_BG, anchor="w",
+                 text="Potřebujete alespoň %s MB volného místa na disku." % (need or "?")).pack(
+            side="bottom", anchor="w", padx=14, pady=14)
         self.buttons()
 
     def browse(self):
         d = filedialog.askdirectory(title="Vyberte složku", initialdir=self.dest.get() or None)
         if d:
-            self.dest.set(os.path.normpath(os.path.join(d, APP_NAME)) if os.path.basename(d) != APP_NAME else os.path.normpath(d))
+            self.dest.set(os.path.normpath(os.path.join(d, APP_NAME)) if os.path.basename(d) != APP_NAME
+                          else os.path.normpath(d))
+
+    def validate_folder(self):
+        dest = self.dest.get().strip()
+        if not dest or not os.path.isabs(dest):
+            messagebox.showerror("Složka", "Zadejte úplnou cestu ke složce, např. C:\\Program Files\\%s." % APP_NAME)
+            return False
+        dest = os.path.normpath(dest)
+        try:
+            os.makedirs(dest, exist_ok=True)
+            probe = os.path.join(dest, ".vlcr_write_test")
+            with open(probe, "w") as fh:
+                fh.write("ok")
+            os.remove(probe)
+        except OSError as e:
+            messagebox.showerror("Složku nelze použít",
+                                 "Do vybrané složky nelze zapisovat. Vyberte jinou složku nebo spusťte "
+                                 "instalátor jako správce.\n\n%s" % e)
+            return False
+        need = self.required_mb()
+        try:
+            free_mb = shutil.disk_usage(dest).free // (1024 * 1024)
+        except OSError:
+            free_mb = None
+        if need and free_mb is not None and free_mb < need:
+            messagebox.showerror("Nedostatek místa",
+                                 "Na disku je volných %d MB, potřebujete alespoň %d MB." % (free_mb, need))
+            return False
+        self.dest.set(dest)
+        return True
 
     def page_ready(self):
         self.layout(True, BODY_BG)
         self.set_header("Připraven k instalaci", "Průvodce je připraven zahájit instalaci sady %s." % APP_NAME)
         c = self.content
         tk.Label(c, bg=BODY_BG, justify="left", wraplength=470, anchor="w",
-                 text="Klepnutím na tlačítko Instalovat pokračujte v kopírování souborů.").pack(anchor="w", padx=14, pady=(14, 8))
+                 text="Klepnutím na tlačítko Instalovat pokračujte v kopírování souborů.").pack(
+            anchor="w", padx=14, pady=(14, 8))
         box = tk.Frame(c, bg=LINE)
         box.pack(fill="both", expand=True, padx=14, pady=(0, 14))
         inner = tk.Frame(box, bg=WHITE)
         inner.pack(fill="both", expand=True, padx=1, pady=1)
         tk.Label(inner, bg=WHITE, anchor="nw", justify="left", wraplength=440,
-                 text="Cílové umístění:\n    %s\n\nSoučásti sady:\n    • Hlavní rozcestník (vlcr-kancelar)\n    • Další moduly v apps/ (Písař, Prezentář, Průzkumník)" %
-                      self.dest.get()).pack(anchor="nw", padx=10, pady=8)
+                 text="Cílové umístění:\n    %s\n\nSoučásti sady:\n    • Hlavní rozcestník (vlcr-kancelar)\n"
+                      "    • Písař\n    • Počítář\n    • Prezentář\n    • Průzkumník souborů" % self.dest.get()
+                 ).pack(anchor="nw", padx=10, pady=8)
         self.buttons(next_text="Instalovat")
 
     def page_installing(self):
         self.layout(True, BODY_BG)
         self.set_header("Probíhá instalace", "Počkejte prosím, než průvodce nainstaluje moduly sady %s." % APP_NAME)
         c = self.content
-        self.status = tk.Label(c, bg=BODY_BG, anchor="w", text="Připravování instalace…")
+        self.status = tk.Label(c, bg=BODY_BG, anchor="w", text="Kopírování souborů…")
         self.status.pack(anchor="w", padx=14, pady=(30, 4))
         self.pbar = ttk.Progressbar(c, maximum=100, length=300, mode="determinate")
         self.pbar.pack(fill="x", padx=14, pady=(0, 6))
         self.fname = tk.Label(c, bg=BODY_BG, anchor="w", text="")
         self.fname.pack(anchor="w", padx=14)
-        self.buttons(back=False, next_on=False)
-        
-        self.after(200, self.run_real_installation)
+        self.buttons(back=False, cancel=False, next_on=False)
 
-    def run_real_installation(self):
-        target_dir = self.dest.get()
-        try:
-            os.makedirs(target_dir, exist_ok=True)
-            total = len(ITEMS_TO_COPY)
-            
-            for i, name in enumerate(ITEMS_TO_COPY):
-                self.status.configure(text=f"Kopírování položky ({i+1}/{total})…")
-                self.fname.configure(text=name)
-                self.update()
-                
-                # Inteligentní vyhledání zdroje v několika možných složkách
-                possible_paths = [
-                    os.path.join(BASE_DIR, name),                  # Hned vedle binárky (pokud je ve složce dist)
-                    os.path.join(BASE_DIR, "dist", name),          # V podadresáři dist
-                    os.path.join(os.path.dirname(BASE_DIR), name), # O úroveň výš
-                    os.path.join(os.path.dirname(BASE_DIR), "dist", name)
-                ]
-                
-                src = None
-                for p in possible_paths:
-                    if os.path.exists(p):
-                        src = p
-                        break
-                
-                # Pokud se nic nenalezlo, vezmeme první cestu pro fallback/vytvoření placeholderu
-                if not src:
-                    src = possible_paths[0]
+        self.state = {"percent": 0, "file": "", "done": False, "error": None, "warnings": []}
+        threading.Thread(target=self._install_worker, daemon=True).start()
+        self.after_id = self.after(100, self._poll)
 
-                dest = os.path.join(target_dir, name)
-                
-                if os.path.exists(src):
-                    if os.path.isdir(src):
-                        if os.path.exists(dest):
-                            shutil.rmtree(dest)
-                        shutil.copytree(src, dest)
-                    else:
-                        os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        shutil.copy2(src, dest)
-                else:
-                    # Vytvoří se placeholder jen pokud zdroj fyzicky neexistuje
-                    if "." in name:
-                        os.makedirs(os.path.dirname(dest), exist_ok=True)
-                        with open(dest, "w", encoding="utf-8") as f:
-                            f.write(f"# Placeholder pro {name}\n")
-                    else:
-                        os.makedirs(dest, exist_ok=True)
-                
-                self.pbar["value"] = ((i + 1) / total) * 100
-                self.update()
-            
-            self.status.configure(text="Dokončování instalace…")
-            self.update()
-            self.after(600, lambda: self.goto("finish"))
-            
-        except Exception as e:
-            messagebox.showerror("Chyba instalace", f"Při instalaci došlo k chybě:\n{str(e)}")
+    def _poll(self):
+        st = self.state
+        if st["error"]:
+            messagebox.showerror("Chyba instalace", "Při instalaci došlo k chybě:\n%s" % st["error"])
             self.destroy()
+            return
+        self.pbar["value"] = st["percent"]
+        self.fname.configure(text=st["file"])
+        if st["done"]:
+            self.status.configure(text="Dokončování instalace…")
+            self.after_id = self.after(300, lambda: self.goto("finish"))
+            return
+        self.after_id = self.after(100, self._poll)
+
+    def _install_worker(self):
+        """Běží ve vlákně; stav předává přes self.state (čte ho _poll v hlavním vlákně)."""
+        try:
+            dest = self.dest.get()
+            os.makedirs(dest, exist_ok=True)
+            self._clean_previous(dest)
+
+            def progress(done, total, name):
+                self.state["percent"] = done * 100.0 / total
+                self.state["file"] = name
+
+            self.payload.extract(dest, progress)
+            if sys.platform == "win32":
+                self._post_install_windows(dest)
+            self.state["percent"] = 100
+            self.state["done"] = True
+        except Exception as e:
+            self.state["error"] = str(e)
+
+    @staticmethod
+    def _clean_previous(dest):
+        """Při aktualizaci odstraní jen vlastní součásti staré verze (ne celou složku)."""
+        shutil.rmtree(os.path.join(dest, "_internal"), ignore_errors=True)
+        for name in ["uninstall.ps1"] + [exe for _, exe in PROGRAMS]:
+            try:
+                os.remove(os.path.join(dest, name))
+            except OSError:
+                pass
+
+    def _post_install_windows(self, dest):
+        warnings = self.state["warnings"]
+        try:
+            with open(os.path.join(dest, "uninstall.ps1"), "w", encoding="utf-8-sig") as fh:
+                fh.write(uninstall_script_text())
+        except OSError as e:
+            warnings.append("Odinstalační skript: %s" % e)
+        try:
+            run_powershell(build_shortcut_script(dest, bool(self.desktop_icon.get())))
+        except Exception as e:
+            warnings.append("Zástupci v nabídce Start: %s" % e)
+        try:
+            register_uninstall(dest, self.payload.total_size())
+        except Exception as e:
+            warnings.append("Záznam v Odinstalaci programů: %s" % e)
 
     def page_finish(self):
         right = self.side_page(

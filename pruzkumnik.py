@@ -10,10 +10,10 @@ jako widget (FileExplorerWidget).
 import sys
 import os
 import json
+import struct
 import zipfile
 import unicodedata
 import subprocess
-import struct
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
@@ -38,22 +38,7 @@ APP_VERSION = "0.1.0"                    # při každém releasu zvyšuj (shodn�
 GITHUB_REPO = "uzivatel/vlcr-kancelar"   # TODO: "vlastnik/repozitar" na GitHubu
 UPDATES_ENABLED = False                  # zapneš, až budou releasy existovat
 
-def _application_directory():
-    """Adresář, ve kterém leží spuštěný Průzkumník / hlavní aplikace."""
-    if getattr(sys, "frozen", False):
-        return os.path.dirname(os.path.abspath(sys.executable))
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-def _resource_directory():
-    """Adresář zdrojů; u PyInstaller onefile jde o dočasný _MEIPASS."""
-    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
-        return sys._MEIPASS
-    return os.path.dirname(os.path.abspath(__file__))
-
-
-BASE_DIR = _application_directory()
-RESOURCE_DIR = _resource_directory()
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 
 def _parse_version(text):
@@ -117,8 +102,8 @@ DEFAULT_VIEW = VIEW_TILES
 FOLDER_COLOR = "#4A412A"
 INVALID_COLOR = "#949494"
 APP_COLORS = {
-    "pisar": "#183A09",
-    "prezentar": "#2600A5",
+    "pisar": "#00A300",
+    "prezentar": "#4F6809",
     "pocitar": "#DA532C",
 }
 
@@ -149,21 +134,11 @@ META_FILE_NAMES = ("metadata.json", "manifest.json", "meta.json")
 APP_KEYS = ("app", "application", "aplikace", "editor", "typ", "type", "format", "kind")
 TITLE_KEYS = ("title", "nazev", "název", "name")
 
-# Spustitelné aplikace leží přímo vedle Průzkumníka.
-# Na Linuxu jsou bez přípony, na Windows se automaticky doplní .exe.
-APP_EXECUTABLES = {
-    "pisar": "pisar",
-    "prezentar": "prezentar",
-    "pocitar": "pocitar",
-}
-
-# Záložní režim pro vývoj: pokud Průzkumník spouštíš jako .py a executable
-# ještě neexistuje, může použít odpovídající Python skript.
-APP_SCRIPTS = {
-    "pisar": "pisar.py",
-    "prezentar": "prezentar.py",
-    "pocitar": "pocitar.py",
-}
+# Jak se spouští jednotlivé aplikace. Výchozí: skript vedle průzkumníku
+# (pisar.py, prezentar.py, pocitar.py) spuštěný aktuálním Pythonem.
+# Přepsat jde cestou k .exe nebo příkazem, např.:
+#   APP_LAUNCHERS = {"pisar": r"C:\VLCR\Pisar.exe"}
+APP_SCRIPTS = {"pisar": "pisar.py", "prezentar": "prezentar.py", "pocitar": "pocitar.py"}
 APP_LAUNCHERS = {}
 
 
@@ -196,30 +171,17 @@ def _as_meta(data):
 
 
 def read_vlcr_metadata(path):
-    """Přečte metadata běžných VLČR souborů a nativních binárních kontejnerů.
-
-    Prezentář používá magic b"VLCRPREZ", Písař b"VLCRPISR". Oba mají
-    společnou hlavičku: magic (8 B) + verze (uint16) + délka metadat (uint32)
-    + UTF-8 metadata JSON + komprimovaný aplikační obsah. Průzkumník čte jen
-    metadata; obsah rozbalí až příslušná aplikace.
-    """
+    """Přečte metadata souboru .vlcr -> {"app": klíč|None, "title": str|None, "raw": dict}."""
     try:
-        with open(path, "rb") as f:
-            prefix = f.read(8)
-            if prefix in (b"VLCRPREZ", b"VLCRPISR"):
-                rest = f.read(6)
-                if len(rest) != 6:
-                    raise VlcrFormatError("Neúplná hlavička binárního souboru .vlcr.")
-                version, meta_len = struct.unpack(">HI", rest)
-                if version != 1:
-                    raise VlcrFormatError(f"Nepodporovaná verze binárního .vlcr: {version}.")
-                if meta_len <= 0 or meta_len > 1024 * 1024:
-                    raise VlcrFormatError("Neplatná délka metadat binárního .vlcr.")
-                meta_raw = f.read(meta_len)
-                if len(meta_raw) != meta_len:
-                    raise VlcrFormatError("Neúplná metadata binárního souboru .vlcr.")
-                return _as_meta(json.loads(meta_raw.decode("utf-8")))
-
+        # Binární kontejner VLČR: 8 B magic ("VLCRPREZ", "VLCRTABL"...) + verze (2 B)
+        # + délka metadat (4 B) + metadata (JSON) + zlib data
+        with open(path, "rb") as fh:
+            head = fh.read(14)
+            if len(head) == 14 and head[:4] == b"VLCR":
+                meta_len = struct.unpack(">HI", head[8:14])[1]
+                if not 0 < meta_len <= 1024 * 1024:
+                    raise VlcrFormatError("Metadata souboru mají neplatnou délku.")
+                return _as_meta(json.loads(fh.read(meta_len).decode("utf-8-sig")))
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as zf:
                 names = {n.lower(): n for n in zf.namelist()}
@@ -227,7 +189,6 @@ def read_vlcr_metadata(path):
                     if cand in names:
                         return _as_meta(json.loads(zf.read(names[cand]).decode("utf-8-sig")))
             raise VlcrFormatError("V souboru nebyla nalezena metadata.")
-
         with open(path, "rb") as f:
             raw = f.read(1024 * 1024)
         return _as_meta(json.loads(raw.decode("utf-8-sig")))
@@ -258,28 +219,24 @@ def get_metadata_cached(path):
 
 
 def _launch_command(app_key, path, base_dir):
-    """Vrátí příkaz pro spuštění aplikace ze stejné složky jako Průzkumník."""
     launcher = APP_LAUNCHERS.get(app_key)
     if launcher:
         cmd = list(launcher) if isinstance(launcher, (list, tuple)) else [launcher]
-        return cmd + [os.path.abspath(path)]
-
-    executable_name = APP_EXECUTABLES.get(app_key)
-    if executable_name:
-        if os.name == "nt" and not executable_name.lower().endswith(".exe"):
-            executable_name += ".exe"
-        executable = os.path.join(base_dir, executable_name)
-        if os.path.isfile(executable):
-            return [executable, os.path.abspath(path)]
-
-    # Python skripty jsou pouze vývojová záloha. Zkompilovaný Průzkumník
-    # vždy vyžaduje přítomnost odpovídajícího executable souboru.
-    if not getattr(sys, "frozen", False):
-        script_name = APP_SCRIPTS.get(app_key)
-        if script_name:
-            script = os.path.join(base_dir, script_name)
-            if os.path.isfile(script):
-                return [sys.executable, script, os.path.abspath(path)]
+        return cmd + [path]
+    if getattr(sys, "frozen", False):
+        # Instalovaná verze (PyInstaller): programy jsou spustitelné soubory vedle sebe.
+        exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+        exe_name = app_key + (".exe" if os.name == "nt" else "")
+        for folder in (exe_dir, os.path.join(exe_dir, "apps")):
+            candidate = os.path.join(folder, exe_name)
+            if os.path.isfile(candidate):
+                return [candidate, path]
+        return None
+    script_name = APP_SCRIPTS.get(app_key)
+    if script_name:
+        script = os.path.join(base_dir, script_name)
+        if os.path.exists(script):
+            return [sys.executable, script, path]
     return None
 
 
@@ -305,7 +262,7 @@ def launch_vlcr(path, parent=None, base_dir=None):
                                 f"Aplikace {title} zatím není nainstalována nebo nastavena.")
         return False
     try:
-        subprocess.Popen(cmd, cwd=base_dir)
+        subprocess.Popen(cmd, cwd=os.path.dirname(cmd[0]) if getattr(sys, "frozen", False) else base_dir)
         return True
     except Exception as e:
         QMessageBox.warning(parent, "Aplikaci se nepodařilo spustit", f"{title}: {e}")
@@ -672,7 +629,7 @@ class FileExplorerWidget(QWidget):
         # ikony pro dlaždice
         folder_icon = QFileIconProvider().icon(QFileIconProvider.Folder)
         self._folder_pm = folder_icon.pixmap(40, 40) if not folder_icon.isNull() else None
-        logo = os.path.join(RESOURCE_DIR, "loga", VLCR_LOGO)
+        logo = os.path.join(self.base_dir, "loga", VLCR_LOGO)
         self._vlcr_pm = (QPixmap(logo).scaled(40, 40, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                          if os.path.exists(logo) else None)
 
@@ -762,7 +719,7 @@ class FileExplorerWidget(QWidget):
         self.model.setFilter(QDir.AllDirs | QDir.Files | QDir.NoDotAndDotDot)
         self.model.setNameFilters(["*.vlcr"])
         self.model.setNameFilterDisables(False)      # skryje ostatní soubory, složky zůstanou
-        self.icon_provider = VlcrIconProvider(os.path.join(RESOURCE_DIR, "loga", VLCR_LOGO))
+        self.icon_provider = VlcrIconProvider(os.path.join(self.base_dir, "loga", VLCR_LOGO))
         self.model.setIconProvider(self.icon_provider)
         self.model.directoryLoaded.connect(self._on_loaded)
 

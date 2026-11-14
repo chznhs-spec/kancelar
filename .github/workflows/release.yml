@@ -1,28 +1,27 @@
 name: Build and Release
 
+# Spustí se po nahrání tagu ve tvaru v1.2.3 (git tag v1.2.3 && git push origin v1.2.3).
+# Ručně (Actions -> Run workflow) se jen sestaví a výsledky jsou ke stažení jako "artifacts",
+# release se v tom případě nevytváří.
 on:
   push:
     tags:
-      - 'v*'
+      - "v*"
+  workflow_dispatch:
 
 permissions:
   contents: write
 
-jobs:
-  build:
-    name: Build for ${{ matrix.os }}
-    runs-on: ${{ matrix.os }}
-    
-    strategy:
-      matrix:
-        include:
-          - os: windows-latest
-            asset_name: vlcr_kancelar_windows_installer.exe
-          - os: ubuntu-latest
-            asset_name: linux_packages
-          - os: macos-latest
-            asset_name: vlcr-kancelar-macos.tar.gz
+env:
+  PYTHON_VERSION: "3.11"
 
+jobs:
+  # ===========================================================================
+  # WINDOWS: jeden soubor vlcr_kancelar_setup.exe, který v sobě nese celou sadu
+  # ===========================================================================
+  windows:
+    name: Windows instalátor
+    runs-on: windows-latest
     steps:
       - name: Stáhnout zdrojový kód
         uses: actions/checkout@v4
@@ -30,130 +29,224 @@ jobs:
       - name: Nastavit Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Určit verzi z tagu a zapsat ji do zdrojových kódů
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          for f in main.py pisar.py pocitar.py prezentar.py pruzkumnik.py vlcr_kancelar_setup.py; do
+            if [ -f "$f" ]; then sed -i -E "s/^APP_VERSION = .*/APP_VERSION = \"$V\"/" "$f"; fi
+          done
+          echo "Verze: $V"
 
       - name: Instalace závislostí
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller pillow PyQt5
+          pip install "pyinstaller>=6.3" pillow PyQt5
 
-      # --- 1. SESTAVENÍ HLAVNÍ APLIKACE A MODULŮ (V BASHI) ---
-      - name: Sestavení hlavní aplikace (PyInstaller)
+      - name: Vytvořit ikony .ico z PNG
         shell: bash
         run: |
-          pyinstaller --noconsole --onedir -n vlcr-kancelar --add-data "images${{ matrix.os == 'windows-latest' && ';' || ':' }}images" main.py
-
-      - name: Sestavení a přibalení vedlejších aplikací (Písař, Počítáč, Prezentář, Průzkumník)
-        shell: bash
-        run: |
-          mkdir -p dist/vlcr-kancelar/apps
-
-          pyinstaller --noconsole --onedir -n pisar pisar.py
-          pyinstaller --noconsole --onedir -n pocitar pocitar.py
-          pyinstaller --noconsole --onedir -n prezentar prezentar.py
-          pyinstaller --noconsole --onedir -n pruzkumnik pruzkumnik.py
-
-          # Univerzální zkopírování bez ohledu na to, zda jde o adresář nebo soubor s .exe příponou
-          for app in pisar pocitar prezentar pruzkumnik; do
-            if [ -d "dist/$app" ]; then
-              cp -r dist/$app/* dist/vlcr-kancelar/apps/
-            elif [ -f "dist/$app" ]; then
-              cp dist/$app dist/vlcr-kancelar/apps/
-            elif [ -f "dist/$app.exe" ]; then
-              cp dist/$app.exe dist/vlcr-kancelar/apps/
-            fi
-          done
-
-      # --- 2. WINDOWS: Inno Setup ---
-      - name: Instalace Inno Setup (Windows)
-        if: matrix.os == 'windows-latest'
-        run: choco install innosetup -y
-
-      - name: Kompilace instalátoru (Windows)
-        if: matrix.os == 'windows-latest'
-        run: |
-          $iscc = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe"
-          if (-not (Test-Path $iscc)) {
-              $iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+          python - <<'PY'
+          import os
+          from PIL import Image
+          os.makedirs("build_icons", exist_ok=True)
+          SRC = {
+              "vlcr-kancelar": "images/VLCR_logo.png",
+              "pisar": "loga/pisar.png",
+              "pocitar": "loga/pocitar.png",
+              "prezentar": "loga/prezenter.png",
+              "pruzkumnik": "loga/pruzkumnik_souboru.png",
           }
-          & $iscc setup.iss
+          for name, src in SRC.items():
+              if not os.path.isfile(src):
+                  print("chybí ikona", src)
+                  continue
+              im = Image.open(src).convert("RGBA")
+              side = max(im.size)
+              canvas = Image.new("RGBA", (side, side), (0, 0, 0, 0))
+              canvas.paste(im, ((side - im.width) // 2, (side - im.height) // 2))
+              canvas.save(f"build_icons/{name}.ico", sizes=[(s, s) for s in (256, 128, 64, 48, 32, 16)])
+              print("ikona", name)
+          PY
 
-      # --- 3. LINUX: Vytvoření .deb a .rpm balíčků ---
-      - name: Vytvoření Linux balíčků (.deb a .rpm)
-        if: matrix.os == 'ubuntu-latest'
+      - name: Sestavit celou sadu (jeden společný adresář)
+        shell: bash
+        run: |
+          pyinstaller --noconfirm --clean vlcr_suite.spec
+          for exe in vlcr-kancelar pisar pocitar prezentar pruzkumnik; do
+            test -f "dist/vlcr-kancelar/$exe.exe" || { echo "CHYBÍ $exe.exe"; exit 1; }
+          done
+          ls -la dist/vlcr-kancelar
+
+      - name: Zabalit sadu do payload.zip
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, zipfile
+          src = "dist/vlcr-kancelar"
+          with zipfile.ZipFile("payload.zip", "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+              for root, _, files in os.walk(src):
+                  for f in files:
+                      p = os.path.join(root, f)
+                      z.write(p, os.path.relpath(p, src).replace(os.sep, "/"))
+          print("payload.zip:", round(os.path.getsize("payload.zip") / 1048576, 1), "MB")
+          PY
+
+      - name: Sestavit instalátor vlcr_kancelar_setup.exe
+        shell: bash
+        run: |
+          ICON=""
+          if [ -f build_icons/vlcr-kancelar.ico ]; then ICON="--icon build_icons/vlcr-kancelar.ico"; fi
+          pyinstaller --noconfirm --clean --onefile --noconsole --uac-admin \
+            -n vlcr_kancelar_setup $ICON \
+            --add-data "payload.zip;." \
+            --add-data "images;images" \
+            vlcr_kancelar_setup.py
+          test -f dist/vlcr_kancelar_setup.exe
+
+      - name: Uložit instalátor
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: dist/vlcr_kancelar_setup.exe
+          if-no-files-found: error
+
+  # ===========================================================================
+  # openSUSE: balíček .rpm (instalace: sudo zypper install ./vlcr-kancelar-*.rpm)
+  # Sestavuje se na Ubuntu 22.04 (starší glibc = běží i na novějších openSUSE).
+  # ===========================================================================
+  rpm:
+    name: openSUSE .rpm
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Stáhnout zdrojový kód
+        uses: actions/checkout@v4
+
+      - name: Nastavit Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Určit verzi z tagu a zapsat ji do zdrojových kódů
+        id: ver
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          for f in main.py pisar.py pocitar.py prezentar.py pruzkumnik.py; do
+            if [ -f "$f" ]; then sed -i -E "s/^APP_VERSION = .*/APP_VERSION = \"$V\"/" "$f"; fi
+          done
+          echo "Verze: $V"
+
+      - name: Systémové balíčky (rpmbuild a knihovny pro Qt)
         run: |
           sudo apt-get update
-          sudo apt-get install -y ruby ruby-dev rubygems rpm
-          sudo gem install fpm
+          sudo apt-get install -y rpm libgl1 libxkbcommon0 libglib2.0-0 libfontconfig1 libdbus-1-3
 
-          mkdir -p pkg_root/opt/vlcr-kancelar
-          mkdir -p pkg_root/usr/share/applications
-          mkdir -p pkg_root/usr/share/pixmaps
-
-          cp -r dist/vlcr-kancelar/* pkg_root/opt/vlcr-kancelar/
-
-          cat << 'EOF' > pkg_root/usr/share/applications/vlcr-kancelar.desktop
-          [Desktop Entry]
-          Name=VLČR Kancelář
-          Comment=Kancelářský balík
-          Exec=/opt/vlcr-kancelar/vlcr-kancelar
-          Icon=vlcr-kancelar
-          Type=Application
-          Categories=Office;
-          EOF
-
-          if [ -f "images/VLCR_logo.png" ]; then
-            cp images/VLCR_logo.png pkg_root/usr/share/pixmaps/vlcr-kancelar.png
-          fi
-
-          fpm -s dir -t deb \
-            -n vlcr-kancelar \
-            -v 1.1.0 \
-            --architecture amd64 \
-            --category utils \
-            --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
-            --description "Kancelářský balík VLČR Kancelář" \
-            pkg_root/=/
-
-          fpm -s dir -t rpm \
-            -n vlcr-kancelar \
-            -v 1.1.0 \
-            --architecture x86_64 \
-            --rpm-digest sha256 \
-            --category Office \
-            --maintainer "Vzdělaný lid ČR <info@vlcr.cz>" \
-            --description "Kancelářský balík VLČR Kancelář" \
-            pkg_root/=/
-
-      # --- 4. MACOS ---
-      - name: Zabalení pro macOS
-        if: matrix.os == 'macos-latest'
+      - name: Instalace závislostí
         run: |
-          tar -czvf vlcr-kancelar-macos.tar.gz -C dist .
+          python -m pip install --upgrade pip
+          pip install "pyinstaller>=6.3" pillow PyQt5
 
-      # --- 5. NAHRÁNÍ VÝSTUPŮ DO GITHUB RELEASES ---
-      - name: Nahrát Windows instalátor
-        uses: softprops/action-gh-release@v2
-        if: matrix.os == 'windows-latest'
-        with:
-          files: vlcr_kancelar_windows_installer.exe
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sestavit celou sadu (jeden společný adresář)
+        run: |
+          pyinstaller --noconfirm --clean vlcr_suite.spec
+          for exe in vlcr-kancelar pisar pocitar prezentar pruzkumnik; do
+            test -x "dist/vlcr-kancelar/$exe" || { echo "CHYBÍ $exe"; exit 1; }
+          done
+          dist/vlcr-kancelar/pocitar --version
+          dist/vlcr-kancelar/pruzkumnik --version
 
-      - name: Nahrát Linux balíčky
-        uses: softprops/action-gh-release@v2
-        if: matrix.os == 'ubuntu-latest'
-        with:
-          files: |
-            vlcr-kancelar_1.1.0_amd64.deb
-            vlcr-kancelar_1.1.0-1.x86_64.rpm
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Sestavit .rpm
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.ver.outputs.version }}"
+          RPM_VERSION="${VERSION//-/~}"
+          mkdir -p rpmbuild/BUILD rpmbuild/RPMS rpmbuild/SOURCES rpmbuild/SPECS rpmbuild/SRPMS icons
 
-      - name: Nahrát macOS archiv
-        uses: softprops/action-gh-release@v2
-        if: matrix.os == 'macos-latest'
+          cp_icon() { if [ -f "$1" ]; then cp "$1" "icons/$2"; else cp images/VLCR_logo.png "icons/$2"; fi; }
+          cp_icon images/VLCR_logo.png vlcr-kancelar.png
+          cp_icon loga/pisar.png vlcr-pisar.png
+          cp_icon loga/pocitar.png vlcr-pocitar.png
+          cp_icon loga/prezenter.png vlcr-prezentar.png
+          cp_icon loga/pruzkumnik_souboru.png vlcr-pruzkumnik.png
+
+          rpmbuild -bb packaging/vlcr-kancelar.spec \
+            --target x86_64-linux \
+            --define "_topdir $PWD/rpmbuild" \
+            --define "app_version $RPM_VERSION" \
+            --define "stage_dir $PWD/dist/vlcr-kancelar" \
+            --define "icons_dir $PWD/icons" \
+            --define "_binary_payload w6.xzdio"
+
+          ls -la rpmbuild/RPMS/x86_64/
+          rpm -qip rpmbuild/RPMS/x86_64/*.rpm
+          rpm -qlp rpmbuild/RPMS/x86_64/*.rpm | head -40
+
+      - name: Uložit .rpm
+        uses: actions/upload-artifact@v4
         with:
-          files: vlcr-kancelar-macos.tar.gz
+          name: opensuse-rpm
+          path: rpmbuild/RPMS/x86_64/*.rpm
+          if-no-files-found: error
+
+  # Kontrola, že se balíček dá opravdu nainstalovat i odinstalovat na openSUSE
+  # (neblokuje vydání - jen ukáže problém v logu).
+  verify-rpm:
+    name: Kontrola .rpm na openSUSE
+    needs: rpm
+    runs-on: ubuntu-latest
+    container: opensuse/tumbleweed:latest
+    steps:
+      - name: Stáhnout .rpm
+        uses: actions/download-artifact@v4
+        with:
+          name: opensuse-rpm
+          path: rpm
+
+      - name: Instalace a odinstalace přes zypper
+        run: |
+          set -eu
+          zypper --non-interactive refresh
+          zypper --non-interactive --no-gpg-checks install --allow-unsigned-rpm --no-recommends ./rpm/*.rpm
+          rpm -qi vlcr-kancelar
+          test -x /opt/vlcr-kancelar/vlcr-kancelar
+          test -x /opt/vlcr-kancelar/pocitar
+          ls /usr/share/applications/ | grep vlcr
+          zypper --non-interactive remove vlcr-kancelar
+          test ! -e /opt/vlcr-kancelar
+
+  # ===========================================================================
+  # Vydání na GitHubu: jedno vytvoření releasu se všemi soubory
+  # ===========================================================================
+  release:
+    name: Vytvořit GitHub release
+    needs: [windows, rpm]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    steps:
+      - name: Stáhnout sestavené soubory
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Kontrolní součty
+        run: |
+          cd artifacts
+          ls -la
+          sha256sum * > SHA256SUMS.txt
+          cat SHA256SUMS.txt
+
+      - name: Vydat release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

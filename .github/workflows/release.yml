@@ -161,6 +161,17 @@ jobs:
           dist/vlcr-kancelar/pocitar --version
           dist/vlcr-kancelar/pruzkumnik --version
 
+      - name: Uložit sestavenou sadu pro .deb
+        run: tar -cf linux-bundle.tar -C dist vlcr-kancelar
+
+      - name: Předat sadu dalším jobům
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-bundle
+          path: linux-bundle.tar
+          retention-days: 1
+          if-no-files-found: error
+
       - name: Sestavit .rpm
         run: |
           set -euo pipefail
@@ -220,6 +231,127 @@ jobs:
           test -x /opt/vlcr-kancelar/pocitar
           ls /usr/share/applications/ | grep vlcr
           zypper --non-interactive remove vlcr-kancelar
+          test ! -e /opt/vlcr-kancelar
+
+  # ===========================================================================
+  # Debian / Ubuntu: balíček .deb (instalace: sudo apt install ./vlcr-kancelar_*.deb)
+  # Používá stejně sestavenou sadu jako .rpm (Ubuntu 22.04+, Debian 12+).
+  # ===========================================================================
+  deb:
+    name: Debian/Ubuntu .deb
+    needs: rpm
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Stáhnout zdrojový kód
+        uses: actions/checkout@v4
+
+      - name: Stáhnout sestavenou sadu
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-bundle
+
+      - name: Sestavit .deb
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
+          DEB_VERSION="$(printf '%s' "$V" | tr '-' '~')"
+
+          mkdir -p dist && tar -xf linux-bundle.tar -C dist
+          R=debroot
+          mkdir -p "$R/DEBIAN" "$R/opt" "$R/usr/bin" "$R/usr/share/applications" "$R/usr/share/pixmaps"
+          cp -a dist/vlcr-kancelar "$R/opt/vlcr-kancelar"
+
+          ln -s /opt/vlcr-kancelar/vlcr-kancelar "$R/usr/bin/vlcr-kancelar"
+          for app in pisar pocitar prezentar pruzkumnik; do
+            ln -s "/opt/vlcr-kancelar/$app" "$R/usr/bin/vlcr-$app"
+          done
+
+          cp_icon() { if [ -f "$1" ]; then cp "$1" "$R/usr/share/pixmaps/$2"; else cp images/VLCR_logo.png "$R/usr/share/pixmaps/$2"; fi; }
+          cp_icon images/VLCR_logo.png vlcr-kancelar.png
+          cp_icon loga/pisar.png vlcr-pisar.png
+          cp_icon loga/pocitar.png vlcr-pocitar.png
+          cp_icon loga/prezenter.png vlcr-prezentar.png
+          cp_icon loga/pruzkumnik_souboru.png vlcr-pruzkumnik.png
+
+          mk_desktop() {
+            cat > "$R/usr/share/applications/$1.desktop" <<EOF
+          [Desktop Entry]
+          Type=Application
+          Name=$2
+          Comment=$3
+          Exec=$4
+          Icon=$1
+          Terminal=false
+          Categories=$5
+          EOF
+          }
+          mk_desktop vlcr-kancelar   "VLČR Kancelář"      "Hlavní rozcestník sady VLČR Kancelář" /opt/vlcr-kancelar/vlcr-kancelar   "Office;"
+          mk_desktop vlcr-pisar      "Písař"              "Textový editor"                       /opt/vlcr-kancelar/pisar           "Office;WordProcessor;"
+          mk_desktop vlcr-pocitar    "Počítář"            "Tabulkový procesor"                   /opt/vlcr-kancelar/pocitar         "Office;Spreadsheet;"
+          mk_desktop vlcr-prezentar  "Prezentář"          "Editor prezentací"                    /opt/vlcr-kancelar/prezentar       "Office;Presentation;"
+          mk_desktop vlcr-pruzkumnik "Průzkumník souborů" "Správa souborů .vlcr"                 /opt/vlcr-kancelar/pruzkumnik      "System;FileManager;"
+
+          SIZE_KB="$(du -sk "$R/opt" | cut -f1)"
+          cat > "$R/DEBIAN/control" <<EOF
+          Package: vlcr-kancelar
+          Version: $DEB_VERSION
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: Vzdělaný lid ČR <info@vlcr.cz>
+          Installed-Size: $SIZE_KB
+          Depends: libc6 (>= 2.35)
+          Recommends: libgl1, libxkbcommon-x11-0, libxcb-icccm4, libxcb-image0, libxcb-keysyms1, libxcb-render-util0, libxcb-xinerama0, libxcb-xkb1, libxcb-randr0, libxcb-shape0, libfontconfig1, libdbus-1-3
+          Description: Kancelářský balík VLČR Kancelář
+           Písař (textový editor), Počítář (tabulky), Prezentář (prezentace)
+           a Průzkumník souborů pro vlastní formát .vlcr.
+          EOF
+
+          cat > "$R/DEBIAN/postinst" <<'EOF'
+          #!/bin/sh
+          set -e
+          update-desktop-database -q /usr/share/applications >/dev/null 2>&1 || true
+          exit 0
+          EOF
+          cp "$R/DEBIAN/postinst" "$R/DEBIAN/postrm"
+          chmod 0755 "$R/DEBIAN/postinst" "$R/DEBIAN/postrm"
+          find "$R" -type d -exec chmod 0755 {} +
+
+          dpkg-deb --build --root-owner-group "$R" "vlcr-kancelar_${DEB_VERSION}_amd64.deb"
+          dpkg-deb -I vlcr-kancelar_*_amd64.deb
+          dpkg-deb -c vlcr-kancelar_*_amd64.deb | head -30
+
+      - name: Uložit .deb
+        uses: actions/upload-artifact@v4
+        with:
+          name: debian-deb
+          path: vlcr-kancelar_*_amd64.deb
+          if-no-files-found: error
+
+  # Kontrola instalace a odinstalace na čistém Debianu (neblokuje vydání)
+  verify-deb:
+    name: Kontrola .deb na Debianu
+    needs: deb
+    runs-on: ubuntu-latest
+    container: debian:12
+    steps:
+      - name: Stáhnout .deb
+        uses: actions/download-artifact@v4
+        with:
+          name: debian-deb
+          path: deb
+
+      - name: Instalace a odinstalace přes apt
+        run: |
+          set -eu
+          apt-get update
+          apt-get install -y --no-install-recommends ./deb/*.deb
+          dpkg -s vlcr-kancelar
+          test -x /opt/vlcr-kancelar/vlcr-kancelar
+          test -x /opt/vlcr-kancelar/pocitar
+          ls /usr/share/applications | grep vlcr
+          apt-get remove -y vlcr-kancelar
           test ! -e /opt/vlcr-kancelar
 
   # ===========================================================================
@@ -328,10 +460,10 @@ jobs:
   # ===========================================================================
   release:
     name: Vytvořit GitHub release
-    # Windows a openSUSE jsou povinné; případné selhání macOS vydání neblokuje
+    # Windows, openSUSE (.rpm) a Debian/Ubuntu (.deb) jsou povinné; případné selhání macOS vydání neblokuje
     # (soubory pro macOS se přidají jen tehdy, když se sestavení povedlo).
-    needs: [windows, rpm, macos]
-    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.windows.result == 'success' && needs.rpm.result == 'success' }}
+    needs: [windows, rpm, deb, macos]
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') && needs.windows.result == 'success' && needs.rpm.result == 'success' && needs.deb.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - name: Stáhnout sestavené soubory
@@ -343,6 +475,7 @@ jobs:
       - name: Kontrolní součty
         run: |
           cd artifacts
+          rm -f linux-bundle.tar   # pomocný soubor mezi joby, do vydání nepatří
           ls -la
           sha256sum * > SHA256SUMS.txt
           cat SHA256SUMS.txt

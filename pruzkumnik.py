@@ -10,24 +10,28 @@ jako widget (FileExplorerWidget).
 import sys
 import os
 import json
+import shutil
 import struct
+import uuid
 import zipfile
+import zlib
 import unicodedata
 import subprocess
+import datetime as dt
 
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QFrame, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QTreeView,
     QFileSystemModel, QFileIconProvider, QMessageBox, QShortcut, QHeaderView,
-    QAbstractItemView, QScrollArea, QGridLayout, QStackedWidget
+    QAbstractItemView, QScrollArea, QGridLayout, QStackedWidget, QMenu, QInputDialog
 )
 from PyQt5.QtCore import (
     Qt, QDir, QFileInfo, QSize, QStandardPaths, QSettings, QPointF, QTimer,
-    QPropertyAnimation, QEasingCurve, pyqtSignal, pyqtProperty
+    QPropertyAnimation, QEasingCurve, pyqtSignal, pyqtProperty, QMimeData, QUrl, QPoint
 )
 from PyQt5.QtGui import (
     QFont, QIcon, QKeySequence, QPainter, QColor, QPen, QRadialGradient,
-    QCursor, QPixmap
+    QCursor, QPixmap, QDrag
 )
 
 # ---------------------------------------------------------------------------
@@ -274,6 +278,83 @@ def launch_vlcr(path, parent=None, base_dir=None):
         return False
 
 
+# ==== NOVÉ SOUBORY ==========================================================
+CONTAINER_VERSION = 1
+
+
+def _now_iso():
+    return dt.datetime.now().astimezone().isoformat(timespec="seconds")
+
+
+def unique_path(folder, stem, ext=""):
+    """Cesta, která ještě neexistuje: Název.ext, Název (2).ext, ..."""
+    candidate = os.path.join(folder, stem + ext)
+    k = 2
+    while os.path.exists(candidate):
+        candidate = os.path.join(folder, "%s (%d)%s" % (stem, k, ext))
+        k += 1
+    return candidate
+
+
+def safe_name(text):
+    text = "".join(ch for ch in text.strip() if ch not in '<>:"/\\|?*' and ord(ch) >= 32)
+    return text.strip(" .")
+
+
+def _container_bytes(magic, meta, payload):
+    """Binární kontejner .vlcr: magic (8 B) + verze (2 B) + délka metadat (4 B) + metadata + zlib(JSON)."""
+    meta_raw = json.dumps(meta, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    body = zlib.compress(json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8"), 8)
+    return magic + struct.pack(">HI", CONTAINER_VERSION, len(meta_raw)) + meta_raw + body
+
+
+def new_spreadsheet_bytes(title):
+    meta = {"app": "pocitar", "application": "spreadsheet", "aplikace": "tabulka", "type": "sheet",
+            "format": "xlsx", "container_format": "VLCRTABL", "container_version": CONTAINER_VERSION,
+            "generator": "VLČR Průzkumník " + APP_VERSION, "title": title, "created": _now_iso(),
+            "modified": _now_iso(), "sheet_count": 1, "content_encoding": "zlib+json"}
+    payload = {"sheets": [{"name": "List1", "cells": [], "col_widths": [], "row_heights": [],
+                           "merges": [], "n_rows": 1000, "n_cols": 52}], "active": 0}
+    return _container_bytes(b"VLCRTABL", meta, payload)
+
+
+def new_presentation_bytes(title):
+    meta = {"app": "prezentar", "application": "presentation", "aplikace": "prezentace", "type": "slides",
+            "format": "pptx", "container_format": "VLCRPREZ", "container_version": CONTAINER_VERSION,
+            "generator": "VLČR Průzkumník " + APP_VERSION, "title": title, "created": _now_iso(),
+            "modified": _now_iso(), "slide_count": 1, "content_encoding": "zlib+json"}
+    slide = {"id": str(uuid.uuid4()), "name": "Snímek 1", "background": "#FFFFFF", "transition": "none",
+             "notes": "", "elements": [
+                 {"type": "text", "x": 100, "y": 95, "w": 1080, "text": "Nadpis snímku",
+                  "font_family": "Aptos", "font_size": 46, "color": "#18395B", "bold": True},
+                 {"type": "text", "x": 120, "y": 230, "w": 1000,
+                  "text": "Dvojklikem upravte text.\nZ panelu Vložení přidejte obrázky a tvary.",
+                  "font_family": "Aptos", "font_size": 26, "color": "#333333", "bold": False}]}
+    return _container_bytes(b"VLCRPREZ", meta, {"slides": [slide], "assets": {}})
+
+
+# (klíč aplikace, text v nabídce, výchozí název, funkce vytvářející obsah nebo None)
+# Písař: formát souboru zatím není doplněn - položka je v nabídce neaktivní.
+NEW_FILE_TYPES = [
+    ("pisar", "Dokument (Písař)", "Nový dokument", None),
+    ("pocitar", "Tabulka (Počítář)", "Nová tabulka", new_spreadsheet_bytes),
+    ("prezentar", "Prezentace (Prezentář)", "Nová prezentace", new_presentation_bytes),
+]
+
+
+def create_vlcr_file(folder, app_key, title):
+    """Vytvoří nový prázdný soubor .vlcr a vrátí jeho cestu (nikdy nepřepíše existující soubor)."""
+    spec = next((t for t in NEW_FILE_TYPES if t[0] == app_key), None)
+    if spec is None or spec[3] is None:
+        raise NotImplementedError("Pro tento typ zatím nelze vytvořit soubor.")
+    stem = safe_name(title) or spec[2]
+    path = unique_path(folder, stem, ".vlcr")
+    with open(path, "xb") as fh:
+        fh.write(spec[3](stem))
+    return path
+# ==== KONEC NOVÝCH SOUBORŮ ==================================================
+
+
 # ---------------------------------------------------------------------------
 # Model souborů: jen složky + .vlcr, ikona VLČR, sloupec "Aplikace"
 # ---------------------------------------------------------------------------
@@ -354,6 +435,8 @@ class ItemTile(QFrame):
     """Dlaždice složky / souboru .vlcr s plynulým gradientem sledujícím kurzor."""
     clicked = pyqtSignal(object)         # výběr (klik)
     activated = pyqtSignal(str, bool)    # otevření (dvojklik): cesta, je_složka
+    files_dropped = pyqtSignal(list, str, bool)   # cesty, cílová složka, přesunout?
+    drag_finished = pyqtSignal()
 
     W, H = 150, 120
     HOVER_MS = 180
@@ -385,6 +468,8 @@ class ItemTile(QFrame):
         self.setFixedSize(self.W, self.H)
         self.setCursor(Qt.ArrowCursor)
         self.setToolTip(os.path.basename(path))
+        self._press_pos = None
+        self.setAcceptDrops(is_dir)          # na složku lze soubory pustit
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 10)
@@ -462,16 +547,57 @@ class ItemTile(QFrame):
         self._target = QPointF(event.pos())
         if not self._timer.isActive():
             self._timer.start()
+        if (self._press_pos is not None and (event.buttons() & Qt.LeftButton)
+                and (event.pos() - self._press_pos).manhattanLength() >= QApplication.startDragDistance()):
+            self._press_pos = None
+            self._start_drag()
 
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             self.is_pressed = True
+            self._press_pos = event.pos()
             self.clicked.emit(self)
             self.update()
 
     def mouseReleaseEvent(self, event):
         self.is_pressed = False
+        self._press_pos = None
         self.update()
+
+    def _start_drag(self):
+        """Přetažení souboru / složky do jiného okna nebo aplikace (předává se jako URL souboru)."""
+        mime = QMimeData()
+        mime.setUrls([QUrl.fromLocalFile(self.path)])
+        mime.setText(self.path)
+        drag = QDrag(self)
+        drag.setMimeData(mime)
+        pm = self.grab().scaled(110, 88, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        drag.setPixmap(pm)
+        drag.setHotSpot(QPoint(pm.width() // 2, pm.height() // 2))
+        self.is_pressed = False
+        self.update()
+        drag.exec_(Qt.CopyAction | Qt.MoveAction, Qt.CopyAction)
+        self._animate_to(0.0)
+        self.drag_finished.emit()
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    dragMoveEvent = dragEnterEvent
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        if not paths:
+            event.ignore()
+            return
+        move = bool(event.keyboardModifiers() & Qt.ShiftModifier)
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+        self.files_dropped.emit(paths, self.path, move)
 
     def mouseDoubleClickEvent(self, event):
         if event.button() == Qt.LeftButton:
@@ -502,6 +628,8 @@ class TileView(QScrollArea):
     """Posuvná plocha s dlaždicemi, které se podle šířky zalamují do řádků."""
     selection_changed = pyqtSignal(object)   # vybraná dlaždice nebo None
     item_activated = pyqtSignal(str, bool)   # cesta, je_složka
+    files_dropped = pyqtSignal(list, str, bool)
+    drag_finished = pyqtSignal()
 
     SPACING = 10
     MARGIN = 6
@@ -561,6 +689,8 @@ class TileView(QScrollArea):
                             d["color"], d.get("pixmap"))
             tile.clicked.connect(self._select)
             tile.activated.connect(self.item_activated)
+            tile.files_dropped.connect(self.files_dropped)
+            tile.drag_finished.connect(self.drag_finished)
             self._tiles.append(tile)
 
         self._empty.setVisible(not entries)
@@ -639,6 +769,7 @@ class FileExplorerWidget(QWidget):
                          if os.path.exists(logo) else None)
 
         self.setStyleSheet("background: transparent;")
+        self.setAcceptDrops(True)            # soubory z jiných oken se zkopírují do aktuální složky
         self._build_ui(title)
         self._build_shortcuts()
         self.set_view_mode(self.view_mode, save=False)
@@ -678,6 +809,9 @@ class FileExplorerWidget(QWidget):
                                           lambda: self.set_view_mode(VIEW_TILES), checkable=True)
         self.btn_list = self._nav_button("☰", "Zobrazení seznamu",
                                          lambda: self.set_view_mode(VIEW_LIST), checkable=True)
+        self.btn_new = self._nav_button("＋ Nový", "Nový soubor .vlcr nebo složka", lambda: None)
+        self.btn_new.setFixedSize(84, 32)
+        self.btn_new.setMenu(self._build_new_menu())
         for b in (self.btn_back, self.btn_forward, self.btn_up):
             toolbar.addWidget(b)
 
@@ -695,6 +829,8 @@ class FileExplorerWidget(QWidget):
         self.path_edit.returnPressed.connect(lambda: self.navigate(self.path_edit.text()))
         toolbar.addWidget(self.path_edit, 1)
         toolbar.addWidget(self.btn_refresh)
+        toolbar.addSpacing(8)
+        toolbar.addWidget(self.btn_new)
         toolbar.addSpacing(8)
         toolbar.addWidget(self.btn_tiles)
         toolbar.addWidget(self.btn_list)
@@ -740,6 +876,10 @@ class FileExplorerWidget(QWidget):
         self.view.setSelectionMode(QAbstractItemView.SingleSelection)
         self.view.setFont(QFont("Segoe UI", 10))
         self.view.setSortingEnabled(True)
+        self.view.setDragEnabled(True)                      # přetažení souboru do jiného okna
+        self.view.setDragDropMode(QAbstractItemView.DragOnly)
+        self.view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.view.customContextMenuRequested.connect(self._show_context_menu)
         self.view.sortByColumn(0, Qt.AscendingOrder)
         header_view = self.view.header()
         header_view.setSectionResizeMode(0, QHeaderView.Stretch)
@@ -769,6 +909,10 @@ class FileExplorerWidget(QWidget):
         self.tile_view = TileView()
         self.tile_view.selection_changed.connect(self._on_tile_selected)
         self.tile_view.item_activated.connect(self._open_path)
+        self.tile_view.files_dropped.connect(self.import_paths)
+        self.tile_view.drag_finished.connect(lambda: QTimer.singleShot(0, self.refresh))
+        self.tile_view.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.tile_view.customContextMenuRequested.connect(self._show_context_menu)
 
         self.stack = QStackedWidget()
         self.stack.addWidget(self.tile_view)
@@ -825,6 +969,111 @@ class FileExplorerWidget(QWidget):
             item = QListWidgetItem(label)
             item.setData(Qt.UserRole, path)
             self.places.addItem(item)
+
+    # --- nové soubory a složky, přetahování --------------------------------
+    _MENU_STYLE = ("QMenu { background: #FFFFFF; color: #000000; border: 1px solid #999999; } "
+                   "QMenu::item { padding: 6px 26px; background: transparent; } "
+                   "QMenu::item:selected { background: #DDE3FF; } QMenu::item:disabled { color: #999999; }")
+
+    def _build_new_menu(self, title=None):
+        menu = QMenu(title, self) if title else QMenu(self)
+        menu.setStyleSheet(self._MENU_STYLE)
+        menu.addAction("Složka", self.create_folder)
+        menu.addSeparator()
+        for key, label, default, writer in NEW_FILE_TYPES:
+            if writer is None:
+                menu.addAction(label + " – připravuje se").setEnabled(False)
+            else:
+                menu.addAction(label, lambda k=key: self.create_file(k))
+        return menu
+
+    def _show_context_menu(self, *_):
+        menu = QMenu(self)
+        menu.setStyleSheet(self._MENU_STYLE)
+        menu.addMenu(self._build_new_menu("Nový"))
+        menu.addAction("Obnovit", self.refresh)
+        menu.exec_(QCursor.pos())
+
+    def create_file(self, app_key):
+        spec = next((t for t in NEW_FILE_TYPES if t[0] == app_key), None)
+        if spec is None or not self._current:
+            return
+        title, ok = QInputDialog.getText(self.window(), "Nový soubor", "Název souboru:", text=spec[2])
+        if not ok:
+            return
+        try:
+            path = create_vlcr_file(self._current, app_key, title)
+        except (OSError, NotImplementedError) as e:
+            QMessageBox.warning(self.window(), "Soubor se nepodařilo vytvořit", str(e))
+            return
+        self.refresh()
+        self._set_status("Vytvořeno: " + os.path.basename(path))
+        launch_vlcr(path, self.window(), self.base_dir)          # rovnou otevřít v příslušné aplikaci
+
+    def create_folder(self):
+        if not self._current:
+            return
+        name, ok = QInputDialog.getText(self.window(), "Nová složka", "Název složky:", text="Nová složka")
+        name = safe_name(name) if ok else ""
+        if not name:
+            return
+        try:
+            os.mkdir(unique_path(self._current, name))
+        except OSError as e:
+            QMessageBox.warning(self.window(), "Složku se nepodařilo vytvořit", str(e))
+            return
+        self.refresh()
+
+    def import_paths(self, paths, dest, move=False):
+        """Zkopíruje (se Shiftem přesune) soubory .vlcr a složky do složky dest."""
+        dest = os.path.normpath(dest)
+        done, skipped = 0, []
+        for src in paths:
+            src = os.path.normpath(src)
+            name = os.path.basename(src)
+            try:
+                if not os.path.exists(src) or os.path.dirname(src) == dest:
+                    continue
+                if os.path.isdir(src):
+                    if dest == src or dest.startswith(src + os.sep):
+                        skipped.append(name)
+                        continue
+                    target = unique_path(dest, name)
+                    (shutil.move if move else shutil.copytree)(src, target)
+                elif src.lower().endswith(".vlcr"):
+                    stem, ext = os.path.splitext(name)
+                    target = unique_path(dest, stem, ext)
+                    (shutil.move if move else shutil.copy2)(src, target)
+                else:
+                    skipped.append(name)
+                    continue
+                done += 1
+            except (OSError, shutil.Error) as e:
+                skipped.append("%s (%s)" % (name, e))
+        self.refresh()
+        text = ("Přesunuto: %d" if move else "Zkopírováno: %d") % done
+        if skipped:
+            text += " · přeskočeno: " + ", ".join(skipped[:3]) + ("…" if len(skipped) > 3 else "")
+        self._set_status(text)
+
+    def dragEnterEvent(self, event):
+        if event.mimeData().hasUrls():
+            event.setDropAction(Qt.CopyAction)
+            event.accept()
+        else:
+            event.ignore()
+
+    dragMoveEvent = dragEnterEvent
+
+    def dropEvent(self, event):
+        paths = [u.toLocalFile() for u in event.mimeData().urls() if u.isLocalFile()]
+        if not paths or not self._current:
+            event.ignore()
+            return
+        move = bool(event.keyboardModifiers() & Qt.ShiftModifier)
+        event.setDropAction(Qt.CopyAction)
+        event.accept()
+        self.import_paths(paths, self._current, move)
 
     # --- navigace ------------------------------------------------------------
     def navigate(self, path, record=True):

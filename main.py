@@ -62,8 +62,8 @@ def application_dir():
 APP_NAME = "VLČR Kancelář"
 APP_VERSION = "0.1.0"
 
-GITHUB_REPO = "uzivatel/vlcr-kancelar"
-UPDATES_ENABLED = False
+GITHUB_REPO = "chznhs-spec/kancelar"
+UPDATES_ENABLED = True
 
 WINDOW_OPACITY = 1.0
 
@@ -160,52 +160,13 @@ if os.name == "nt":
 
 
 # ============================================================
-# AKTUALIZACE
+# AKTUALIZACE (celá sada najednou, viz updater.py)
 # ============================================================
 
-def _parse_version(text):
-    text = text.strip().lstrip("vV")
-    parts = []
-
-    for part in text.split("."):
-        digits = "".join(ch for ch in part if ch.isdigit())
-        parts.append(int(digits) if digits else 0)
-
-    return tuple(parts)
-
-
-def check_for_updates():
-    if not UPDATES_ENABLED:
-        return None
-
-    import json
-    import urllib.request
-
-    url = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
-
-    request = urllib.request.Request(
-        url,
-        headers={"Accept": "application/vnd.github+json"}
-    )
-
-    try:
-        with urllib.request.urlopen(request, timeout=5) as response:
-            data = json.load(response)
-
-    except Exception as error:
-        print(f"Kontrola aktualizací selhala: {error}")
-        return None
-
-    latest = data.get("tag_name", "")
-
-    if _parse_version(latest) > _parse_version(APP_VERSION):
-        return {
-            "version": latest,
-            "url": data.get("html_url", ""),
-            "notes": data.get("body", "")
-        }
-
-    return None
+try:
+    from updater import UpdateManager
+except ImportError:
+    UpdateManager = None
 
 
 # ============================================================
@@ -513,6 +474,35 @@ class VlcrDashboard(QMainWindow):
 
         self.go_to(0)
 
+        # hlídání aktualizací (jen v nainstalované verzi; ve vývoji pomocí VLCR_CHECK_UPDATES=1)
+        self.updater = None
+
+        if UpdateManager is not None:
+            self.updater = UpdateManager(
+                self, APP_VERSION, GITHUB_REPO, application_dir()
+            )
+
+            if UPDATES_ENABLED and (
+                getattr(sys, "frozen", False)
+                or os.environ.get("VLCR_CHECK_UPDATES")
+            ):
+                QTimer.singleShot(4000, self.updater.check_silently)
+
+    # --------------------------------------------------------
+    # AKTUALIZACE
+    # --------------------------------------------------------
+
+    def check_updates_clicked(self):
+        if self.updater is None:
+            QMessageBox.information(
+                self,
+                "Aktualizace",
+                "Modul aktualizací (updater.py) není k dispozici."
+            )
+            return
+
+        self.updater.check_manually()
+
     # --------------------------------------------------------
     # CESTY K IKONÁM
     # --------------------------------------------------------
@@ -628,6 +618,18 @@ class VlcrDashboard(QMainWindow):
             self.nav_buttons.append(btn)
 
         lay.addStretch()
+
+        self.btn_update = QPushButton("Zkontrolovat aktualizace")
+        self.btn_update.setCursor(Qt.PointingHandCursor)
+        self.btn_update.setFont(QFont("Segoe UI", 8))
+        self.btn_update.setStyleSheet(
+            "QPushButton { color: #8FB8E8; background: transparent; border: none;"
+            " text-align: left; padding: 6px 22px; }"
+            "QPushButton:hover { color: white; }"
+        )
+        self.btn_update.clicked.connect(self.check_updates_clicked)
+
+        lay.addWidget(self.btn_update)
 
         self.lbl_version = QLabel(
             f"Verze {APP_VERSION}"
@@ -857,6 +859,7 @@ if __name__ == "__main__":
     app = QApplication(sys.argv)
 
     app.setApplicationName(APP_NAME)
+    app.setDesktopFileName("vlcr-kancelar")         # Linux: shoda s vlcr-kancelar.desktop (ikona na panelu)
     app.setFont(QFont("Segoe UI", 9))
 
     if os.path.isfile(APP_ICON_PATH):

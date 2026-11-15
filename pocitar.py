@@ -1903,7 +1903,7 @@ def write_workbook(path: str, wb: Workbook, title: str, created: Optional[str] =
 # ===========================================================================
 from PyQt5.QtCore import (
     Qt, QAbstractTableModel, QModelIndex, QSize, QMimeData, QByteArray, QItemSelection,
-    QItemSelectionModel, QRectF, QPointF, QUrl
+    QItemSelectionModel, QRectF, QPointF, QUrl, QTimer
 )
 from PyQt5.QtGui import (
     QColor, QFont, QFontMetrics, QIcon, QKeySequence, QPainter, QPen, QBrush, QPixmap,
@@ -2435,6 +2435,7 @@ class PocitarWindow(QMainWindow):
         self.setMinimumSize(1000, 640)
         self.resize(1360, 860)
         self.setWindowIcon(app_icon())
+        self.setAcceptDrops(True)          # soubor .vlcr lze přetáhnout do okna (např. z Průzkumníku)
         self.wb = Workbook()
         self.path: Optional[str] = None
         self.created: Optional[str] = None
@@ -3448,6 +3449,27 @@ class PocitarWindow(QMainWindow):
                           f"<b>Počítář {APP_VERSION}</b><br>Tabulkový procesor ze sady VLČR Kancelář.<br><br>"
                           "Vzorce, více listů, formátování, grafy, import a export CSV a vlastní formát .vlcr.")
 
+    @staticmethod
+    def _dropped_vlcr(mime):
+        for url in mime.urls():
+            if url.isLocalFile() and url.toLocalFile().lower().endswith(".vlcr"):
+                return url.toLocalFile()
+        return None
+
+    def dragEnterEvent(self, event):
+        if self._dropped_vlcr(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if self._dropped_vlcr(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        path = self._dropped_vlcr(event.mimeData())
+        if path:
+            event.acceptProposedAction()
+            QTimer.singleShot(0, lambda: self.open_workbook(path))    # po dokončení přetažení
+
     def closeEvent(self, event):
         if self._confirm_discard():
             event.accept()
@@ -3465,6 +3487,7 @@ def main(argv=None) -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("VLCR")
     app.setApplicationVersion(APP_VERSION)
+    app.setDesktopFileName("vlcr-pocitar")          # Linux: shoda s vlcr-pocitar.desktop (ikona na panelu)
     app.setFont(QFont(Theme.FONT, 9))
     app.setWindowIcon(app_icon())
     window = PocitarWindow(argv[0] if argv else None)

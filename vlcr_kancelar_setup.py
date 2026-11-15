@@ -45,6 +45,20 @@ LOGO_PATH = resource_path(os.path.join("images", "VLCR_logo.png"))
 BG_PATH = resource_path(os.path.join("images", "win72.png"))
 PAYLOAD_ZIP = resource_path("payload.zip")
 
+
+def _arg_value(flag):
+    if flag in sys.argv:
+        i = sys.argv.index(flag)
+        if i + 1 < len(sys.argv):
+            return sys.argv[i + 1]
+    return None
+
+
+# Aktualizace z rozcestníku:  vlcr_kancelar_setup.exe --update --dest "C:\\Program Files\\VLČR Kancelář"
+# (bez průvodce - jen okno s průběhem, po dokončení se aplikace spustí)
+UPDATE_MODE = "--update" in sys.argv
+UPDATE_DEST = _arg_value("--dest")
+
 # Programy sady: (název zástupce, spustitelný soubor)
 PROGRAMS = [
     (APP_NAME, "vlcr-kancelar.exe"),
@@ -293,7 +307,14 @@ class Setup(tk.Tk):
         self.btn_next.grid(row=0, column=2, padx=(0, 10), pady=11)
         self.btn_cancel.grid(row=0, column=3, padx=(0, 12), pady=11)
 
-        self.goto("welcome")
+        if UPDATE_MODE:
+            if UPDATE_DEST:
+                self.dest.set(os.path.normpath(UPDATE_DEST))
+            self.accept.set(1)
+            self.desktop_icon.set(0)        # zástupce na ploše se při aktualizaci znovu nevytváří
+            self.goto("installing")
+        else:
+            self.goto("welcome")
 
     # --- obrázky -------------------------------------------------------------
     def _load_local_images(self):
@@ -390,10 +411,10 @@ class Setup(tk.Tk):
             self.destroy()
 
     def finish(self):
-        if self.page == "finish" and self.state["warnings"]:
+        if (self.page == "finish" or UPDATE_MODE) and self.state["warnings"]:
             messagebox.showwarning("Upozornění", "Instalace proběhla, ale některé kroky se nepodařily:\n\n"
                                    + "\n".join(self.state["warnings"]))
-        if self.launch.get() and self.page == "finish":
+        if self.launch.get() and (self.page == "finish" or UPDATE_MODE):
             main_path = os.path.join(self.dest.get(), MAIN_EXE)
             if os.path.exists(main_path):
                 try:
@@ -549,7 +570,10 @@ class Setup(tk.Tk):
 
     def page_installing(self):
         self.layout(True, BODY_BG)
-        self.set_header("Probíhá instalace", "Počkejte prosím, než průvodce nainstaluje moduly sady %s." % APP_NAME)
+        if UPDATE_MODE:
+            self.set_header("Probíhá aktualizace", "Počkejte prosím, než se aktualizuje celá sada %s." % APP_NAME)
+        else:
+            self.set_header("Probíhá instalace", "Počkejte prosím, než průvodce nainstaluje moduly sady %s." % APP_NAME)
         c = self.content
         self.status = tk.Label(c, bg=BODY_BG, anchor="w", text="Kopírování souborů…")
         self.status.pack(anchor="w", padx=14, pady=(30, 4))
@@ -573,7 +597,7 @@ class Setup(tk.Tk):
         self.fname.configure(text=st["file"])
         if st["done"]:
             self.status.configure(text="Dokončování instalace…")
-            self.after_id = self.after(300, lambda: self.goto("finish"))
+            self.after_id = self.after(300, self.finish if UPDATE_MODE else (lambda: self.goto("finish")))
             return
         self.after_id = self.after(100, self._poll)
 

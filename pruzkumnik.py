@@ -103,12 +103,12 @@ VIEW_TILES, VIEW_LIST = "tiles", "list"
 DEFAULT_VIEW = VIEW_TILES
 
 # barvy dlaždic
-FOLDER_COLOR = "#F0A30A"
+FOLDER_COLOR = "#4A412A"
 INVALID_COLOR = "#949494"
 APP_COLORS = {
-    "pisar": "#00A300",
+    "pisar": "#465612",
     "prezentar": "#2D89EF",
-    "pocitar": "#DA532C",
+    "pocitar": "#FF3700",
 }
 
 

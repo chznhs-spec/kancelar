@@ -292,6 +292,7 @@ jobs:
           mk_desktop vlcr-pocitar    "Počítář"            "Tabulkový procesor"                   /opt/vlcr-kancelar/pocitar         "Office;Spreadsheet;"
           mk_desktop vlcr-prezentar  "Prezentář"          "Editor prezentací"                    /opt/vlcr-kancelar/prezentar       "Office;Presentation;"
           mk_desktop vlcr-pruzkumnik "Průzkumník souborů" "Správa souborů .vlcr"                 /opt/vlcr-kancelar/pruzkumnik      "System;FileManager;"
+          mk_desktop vlcr-poscilogramar "Poscilogramář"   "Vytváření digitálních oscilogramů"    /opt/vlcr-kancelar/poscilogramar   "System;Oscillogram;"
 
           SIZE_KB="$(du -sk "$R/opt" | cut -f1)"
           cat > "$R/DEBIAN/control" <<EOF

@@ -1,35 +1,38 @@
 # -*- mode: python ; coding: utf-8 -*-
 """Společné sestavení celé sady VLČR Kancelář (PyInstaller >= 6).
 
-Výsledkem je JEDEN adresář dist/vlcr-kancelar/, ve kterém leží všechny programy
-(vlcr-kancelar, pisar, pocitar, prezentar, pruzkumnik) a sdílejí jednu složku
-_internal s Pythonem a Qt. Díky tomu je sada několikrát menší, než kdyby měl
-každý program své vlastní kopie knihoven.
+Výsledkem je jeden adresář dist/vlcr-kancelar/ se všemi programy,
+které sdílejí společnou složku _internal s Pythonem a knihovnami.
 
-Spuštění:  pyinstaller --noconfirm --clean vlcr_suite.spec
+Spuštění: pyinstaller --noconfirm --clean vlcr_suite.spec
 """
 import os
 import sys
 
-# (skript, název programu)
+# (vstupní skript, název výsledného programu)
 PROGRAMS = [
     ("main.py", "vlcr-kancelar"),
     ("pisar.py", "pisar"),
     ("pocitar.py", "pocitar"),
     ("prezentar.py", "prezentar"),
     ("pruzkumnik.py", "pruzkumnik"),
+    ("poscilogramar.py", "poscilogramar"),
 ]
 
-# Data dostupná všem programům (v instalaci ve složce _internal).
-# pruzkumnik.py se přibaluje i jako soubor, protože ho Písař/Prezentář/Počítář
-# načítají za běhu (importlib) pro dialog "Otevřít".
+# Data dostupná všem programům v adresáři _internal.
 datas = []
 for folder in ("images", "loga"):
-    if os.path.isdir(os.path.join(SPECPATH, folder)):
-        datas.append((os.path.join(SPECPATH, folder), folder))
-datas.append((os.path.join(SPECPATH, "pruzkumnik.py"), "."))
+    path = os.path.join(SPECPATH, folder)
+    if os.path.isdir(path):
+        datas.append((path, folder))
 
-# Moduly, které se načítají dynamicky a statická analýza je nevidí.
+# Průzkumník je za běhu načítán i dynamicky z ostatních aplikací.
+pruzkumnik_path = os.path.join(SPECPATH, "pruzkumnik.py")
+if os.path.isfile(pruzkumnik_path):
+    datas.append((pruzkumnik_path, "."))
+
+# PyInstaller obvykle lokální import vlcr_format zachytí automaticky.
+# Následující importy jsou používány dynamicky nebo Qt pluginy.
 hiddenimports = [
     "zipfile", "subprocess", "struct", "unicodedata", "zlib", "json", "csv",
     "importlib.util", "statistics", "decimal", "html", "tempfile", "base64",
@@ -44,9 +47,10 @@ def icon_for(name):
 
 analyses, exes = [], []
 for script, name in PROGRAMS:
-    if not os.path.isfile(os.path.join(SPECPATH, script)):
-        print("PŘESKOČENO (soubor neexistuje):", script)
-        continue
+    script_path = os.path.join(SPECPATH, script)
+    if not os.path.isfile(script_path):
+        raise SystemExit("CHYBÍ POVINNÝ SOUBOR APLIKACE: " + script)
+
     a = Analysis(
         [script],
         pathex=[SPECPATH],
@@ -73,8 +77,8 @@ for script, name in PROGRAMS:
     exes.append(exe)
 
 collect_args = []
-for a, exe in zip(analyses, exes):
-    collect_args += [exe, a.binaries, a.datas]
+for analysis, exe in zip(analyses, exes):
+    collect_args += [exe, analysis.binaries, analysis.datas]
 
 coll = COLLECT(
     *collect_args,
@@ -83,9 +87,7 @@ coll = COLLECT(
     name="vlcr-kancelar",
 )
 
-
-# macOS: zabalení do aplikace "VLCR Kancelar.app".
-# Všechny programy sady leží uvnitř Contents/MacOS vedle sebe; hlavní je vlcr-kancelar.
+# macOS: všechny spustitelné programy jsou v Contents/MacOS vedle sebe.
 if sys.platform == "darwin":
     icns = os.path.join(SPECPATH, "build_icons", "vlcr-kancelar.icns")
     app = BUNDLE(

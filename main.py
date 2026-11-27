@@ -178,6 +178,9 @@ APPS = [
     ("prezentar", "Prezentář", "prezenter.png", "#2D89EF", "prezentar.py"),
     ("pocitar", "Počítář", "pocitar.png", "#DA532C", "pocitar.py"),
     ("poscilogramar", "Poscilogramář", "poscilogramar.png", "#00A85A", "poscilogramar.py"),
+    ("poscilogramar", "Poscilogramář", "poscilogramar.png", "#00A85A", "poscilogramar.py"),
+
+
 ]
 
 

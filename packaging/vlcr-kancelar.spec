@@ -1,5 +1,5 @@
-# RPM balíček pro openSUSE (a další distribuce používající rpm).
-# Sestavuje se z hotového adresáře PyInstalleru; hodnoty předává workflow přes --define:
+# RPM balíček pro openSUSE a další distribuce používající RPM.
+# Hodnoty předává workflow přes --define:
 #   app_version  verze (např. 1.2.3)
 #   stage_dir    adresář dist/vlcr-kancelar
 #   icons_dir    adresář s ikonami vlcr-*.png
@@ -19,7 +19,6 @@ Group:          Productivity/Office/Suite
 Packager:       Vzdělaný lid ČR <info@vlcr.cz>
 BuildArch:      x86_64
 AutoReqProv:    no
-# Knihovny, které potřebuje Qt (měkká závislost - chybějící balíček instalaci neblokuje).
 Recommends:     libGL1
 Recommends:     libxkbcommon0
 Recommends:     libxkbcommon-x11-0
@@ -33,14 +32,14 @@ Recommends:     libxcb-xinerama0
 Recommends:     libxcb-xkb1
 
 %description
-VLČR Kancelář je kancelářský balík: Písař (textový editor), Počítář (tabulky),
-Prezentář (prezentace) a Průzkumník souborů pro vlastní formát .vlcr.
+VLČR Kancelář je kancelářský balík obsahující Písař, Počítář, Prezentář,
+Průzkumník souborů a Poscilogramář pro tvorbu digitálních oscilogramů.
 
 %prep
-# nic - obsah se bere z hotového adresáře (stage_dir)
+# Obsah se bere z hotového adresáře stage_dir.
 
 %build
-# nic - program je již sestaven
+# Programy jsou již sestaveny pomocí PyInstalleru.
 
 %install
 rm -rf %{buildroot}
@@ -49,8 +48,12 @@ cp -a %{stage_dir}/. %{buildroot}/opt/vlcr-kancelar/
 
 install -d %{buildroot}%{_bindir}
 ln -s /opt/vlcr-kancelar/vlcr-kancelar %{buildroot}%{_bindir}/vlcr-kancelar
-for app in pisar pocitar prezentar pruzkumnik; do
-    ln -s /opt/vlcr-kancelar/$app %{buildroot}%{_bindir}/vlcr-$app
+for app in pisar pocitar prezentar pruzkumnik poscilogramar; do
+    test -x "%{buildroot}/opt/vlcr-kancelar/$app" || {
+        echo "CHYBÍ sestavená aplikace: $app" >&2
+        exit 1
+    }
+    ln -s "/opt/vlcr-kancelar/$app" "%{buildroot}%{_bindir}/vlcr-$app"
 done
 
 install -d %{buildroot}%{_datadir}/pixmaps
@@ -58,7 +61,7 @@ install -m 0644 %{icons_dir}/vlcr-*.png %{buildroot}%{_datadir}/pixmaps/
 
 install -d %{buildroot}%{_datadir}/applications
 mk_desktop() {
-cat > %{buildroot}%{_datadir}/applications/$1.desktop <<EOF
+cat > "%{buildroot}%{_datadir}/applications/$1.desktop" <<EOF
 [Desktop Entry]
 Type=Application
 Name=$2
@@ -69,11 +72,12 @@ Terminal=false
 Categories=$5
 EOF
 }
-mk_desktop vlcr-kancelar  "VLČR Kancelář"      "Hlavní rozcestník sady VLČR Kancelář" "/opt/vlcr-kancelar/vlcr-kancelar"  "Office;"
-mk_desktop vlcr-pisar     "Písař"              "Textový editor"                       "/opt/vlcr-kancelar/pisar"          "Office;WordProcessor;"
-mk_desktop vlcr-pocitar   "Počítář"            "Tabulkový procesor"                   "/opt/vlcr-kancelar/pocitar"        "Office;Spreadsheet;"
-mk_desktop vlcr-prezentar "Prezentář"          "Editor prezentací"                    "/opt/vlcr-kancelar/prezentar"      "Office;Presentation;"
-mk_desktop vlcr-pruzkumnik "Průzkumník souborů" "Správa souborů .vlcr"                "/opt/vlcr-kancelar/pruzkumnik"     "System;FileManager;"
+mk_desktop vlcr-kancelar       "VLČR Kancelář"      "Hlavní rozcestník sady VLČR Kancelář" "/opt/vlcr-kancelar/vlcr-kancelar"       "Office;"
+mk_desktop vlcr-pisar          "Písař"              "Textový editor"                       "/opt/vlcr-kancelar/pisar"               "Office;WordProcessor;"
+mk_desktop vlcr-pocitar        "Počítář"            "Tabulkový procesor"                   "/opt/vlcr-kancelar/pocitar"             "Office;Spreadsheet;"
+mk_desktop vlcr-prezentar      "Prezentář"          "Editor prezentací"                    "/opt/vlcr-kancelar/prezentar"           "Office;Presentation;"
+mk_desktop vlcr-pruzkumnik     "Průzkumník souborů" "Správa souborů .vlcr"                 "/opt/vlcr-kancelar/pruzkumnik"          "System;FileManager;"
+mk_desktop vlcr-poscilogramar  "Poscilogramář"      "Vytváření digitálních oscilogramů"    "/opt/vlcr-kancelar/poscilogramar"       "Education;Science;"
 
 %post
 update-desktop-database -q %{_datadir}/applications >/dev/null 2>&1 || :
@@ -89,9 +93,10 @@ update-desktop-database -q %{_datadir}/applications >/dev/null 2>&1 || :
 %{_bindir}/vlcr-pocitar
 %{_bindir}/vlcr-prezentar
 %{_bindir}/vlcr-pruzkumnik
+%{_bindir}/vlcr-poscilogramar
 %{_datadir}/applications/vlcr-*.desktop
 %{_datadir}/pixmaps/vlcr-*.png
 
 %changelog
 * Fri Nov 13 2026 Vzdělaný lid ČR <info@vlcr.cz> - %{version}-1
-- Automatické sestavení z GitHub Actions
+- Přidán Poscilogramář do společného balíčku

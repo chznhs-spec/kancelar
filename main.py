@@ -78,7 +78,7 @@ COPYRIGHT_TEXT = "© 2026, Vzdělaný lid České republiky. Všechna práva vyh
 BASE_DIR = application_dir()
 
 # Ikona zabalená v PyInstalleru
-APP_ICON_PATH = resource_path("loga/cervena.png")
+APP_ICON_PATH = resource_path("loga/vlcr.png")
 
 
 # ============================================================
@@ -177,7 +177,6 @@ APPS = [
     ("pisar", "Písař", "pisar.png", "#00A300", "pisar.py"),
     ("prezentar", "Prezentář", "prezenter.png", "#2D89EF", "prezentar.py"),
     ("pocitar", "Počítář", "pocitar.png", "#DA532C", "pocitar.py"),
-    ("poscilogramar", "Poscilogramář", "poscilogramar.png", "#00A85A", "poscilogramar.py"),
     ("poscilogramar", "Poscilogramář", "poscilogramar.png", "#00A85A", "poscilogramar.py"),
 
 

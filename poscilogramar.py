@@ -426,39 +426,32 @@ class PoscilogramarWindow(QMainWindow):
         side.setSpacing(6)
         body.addWidget(self.sidebar)
 
-        title = QLabel("POSCILOGRAMÁŘ")
-        title.setFont(QFont("Tahoma", 10, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        side.addWidget(title)
-        subtitle = QLabel("Ruční editor logických průběhů")
-        subtitle.setFont(QFont("Tahoma", 8))
-        subtitle.setAlignment(Qt.AlignCenter)
-        side.addWidget(subtitle)
+
         side.addWidget(self._sunken_separator())
 
         self.tool_group = QButtonGroup(self)
         self.tool_group.setExclusive(True)
         self.tool_buttons = {}
-        self._section(side, "NÁSTROJE")
+        self._section(side, "Nástroje")
         self._tool_button(side, "✎  Malovat průběh", "paint", "Kliknutím na svislou mřížku přepnete signál.")
         self._tool_button(side, "✋  Posouvat", "pan", "Tažením myší posunete časovou osu.")
         self._tool_button(side, "▣  Označit kanál", "select", "Kliknutím na řádek vyberete kanál.")
         side.addWidget(self._sunken_separator())
 
-        self._section(side, "KANÁLY")
+        self._section(side, "Kanály")
         self._add_button(side, "+  Přidat kanál", self.add_channel)
         self._add_button(side, "Přejmenovat kanál", self.rename_channel)
         self._add_button(side, "Změnit barvu kanálu", self.change_channel_color)
         self._add_button(side, "Odebrat kanál", self.remove_channel)
         side.addWidget(self._sunken_separator())
 
-        self._section(side, "PRACOVNÍ SOUBOR")
+        self._section(side, "Pracovní soubor")
         self._add_button(side, "Otevřít .vlcr…", self.open_dialog)
         self._add_button(side, "Uložit", self.save)
         self._add_button(side, "Uložit jako…", self.save_as)
         side.addWidget(self._sunken_separator())
 
-        self._section(side, "EXPORTOVAT")
+        self._section(side, "Exportovat")
         self._add_button(side, "Exportovat PNG…", lambda: self.export_dialog("png"))
         self._add_button(side, "Exportovat PDF…", lambda: self.export_dialog("pdf"))
         self._add_button(side, "Exportovat SVG…", lambda: self.export_dialog("svg"))
@@ -835,12 +828,21 @@ class PoscilogramarWindow(QMainWindow):
 
 
 def main():
+    # CI a balíčkovací skripty mohou zjistit verzi bez otevření GUI.
+    if len(sys.argv) > 1 and sys.argv[1] in ("--version", "-V"):
+        print(APP_VERSION)
+        return 0
+
     app = QApplication(sys.argv)
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("VLCR")
+    # Název musí odpovídat souboru vlcr-poscilogramar.desktop.
+    # Linux pak správně spáruje okno/panelovou ikonu s desktopovým záznamem.
+    app.setDesktopFileName("vlcr-poscilogramar")
     app.setFont(QFont("Tahoma", 9))
     if os.path.isfile(LOGO_PATH):
-        app.setWindowIcon(QIcon(LOGO_PATH))
+        app_icon = QIcon(LOGO_PATH)
+        app.setWindowIcon(app_icon)
     open_path = None
     if len(sys.argv) > 1 and sys.argv[1].lower().endswith(".vlcr"):
         open_path = sys.argv[1]

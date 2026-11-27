@@ -894,7 +894,7 @@ class WaveformCanvas(QAbstractScrollArea):
             width, self.RULER_H - 1
         )
 
-        font = QFont("Times New Roman", 8)
+        font = QFont("Tahoma", 8)
         painter.setFont(font)
         painter.setPen(QColor("#C8C8C8"))
         painter.drawText(10, 18, "KANÁL")
@@ -1249,15 +1249,7 @@ class PoscilogramarWindow(QMainWindow):
 
         body.addWidget(sidebar_scroll)
 
-        title = QLabel("POSCILOGRAMÁŘ")
-        title.setFont(QFont("Tahoma", 10, QFont.Bold))
-        title.setAlignment(Qt.AlignCenter)
-        side.addWidget(title)
-
-        subtitle = QLabel("Ruční editor logických průběhů")
-        subtitle.setFont(QFont("Tahoma", 8))
-        subtitle.setAlignment(Qt.AlignCenter)
-        side.addWidget(subtitle)
+       
 
         side.addWidget(self._sunken_separator())
 
@@ -1466,7 +1458,7 @@ class PoscilogramarWindow(QMainWindow):
         button = QPushButton(text)
         button.setCheckable(True)
         button.setToolTip(tooltip)
-        button.setFont(QFont("Times New Roman", 8))
+        button.setFont(QFont("Tahoma", 8))
         button.setStyleSheet(retro_button_style())
 
         self.tool_group.addButton(button)

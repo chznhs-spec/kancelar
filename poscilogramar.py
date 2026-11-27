@@ -30,7 +30,7 @@ from vlcr_format import (
 APP_NAME = "Poscilogramář"
 APP_VERSION = "1.1.0"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOGO_PATH = os.path.join(BASE_DIR, "loga", "poscilogramar.png")
+LOGO_PATH = os.path.join(BASE_DIR, "loga/poscilogramar.png")
 
 # Jedna svislá dílka mřížky odpovídá právě zvolené časové jednotce.
 TIME_UNITS = []

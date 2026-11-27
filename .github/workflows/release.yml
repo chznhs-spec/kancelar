@@ -60,6 +60,7 @@ jobs:
               "pocitar": "loga/pocitar.png",
               "prezentar": "loga/prezenter.png",
               "pruzkumnik": "loga/otevrit_soubor.png",
+              "poscilogramar": "loga/poscilogramar.png",
           }
           for name, src in SRC.items():
               if not os.path.isfile(src):
@@ -187,6 +188,7 @@ jobs:
           cp_icon loga/pocitar.png vlcr-pocitar.png
           cp_icon loga/prezenter.png vlcr-prezentar.png
           cp_icon loga/otevrit_soubor.png vlcr-pruzkumnik.png
+          cp_icon loga/poscilogramar.png vlcr-poscilogramar.png
 
           rpmbuild -bb packaging/vlcr-kancelar.spec \
             --target x86_64-linux \
@@ -274,6 +276,7 @@ jobs:
           cp_icon loga/pocitar.png vlcr-pocitar.png
           cp_icon loga/prezenter.png vlcr-prezentar.png
           cp_icon loga/otevrit_soubor.png vlcr-pruzkumnik.png
+          cp_icon loga/poscilogramar.png poscilogramar.png
 
           mk_desktop() {
             cat > "$R/usr/share/applications/$1.desktop" <<EOF

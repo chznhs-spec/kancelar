@@ -109,6 +109,7 @@ APP_COLORS = {
     "pisar": "#465612",
     "prezentar": "#2D89EF",
     "pocitar": "#FF3700",
+    "poscilogramar": "#00A85A",
 }
 
 
@@ -125,6 +126,7 @@ APP_TITLES = {
     "pisar": "Písař",
     "prezentar": "Prezentář",
     "pocitar": "Počítář",
+    "poscilogramar": "Poscilogramář",
 }
 
 # rozpoznané hodnoty v metadatech (bez diakritiky, malými písmeny)
@@ -132,6 +134,7 @@ APP_ALIASES = {
     "pisar": {"pisar", "writer", "document", "dokument", "text", "doc", "docx"},
     "prezentar": {"prezentar", "presentation", "prezentace", "slides", "pptx"},
     "pocitar": {"pocitar", "spreadsheet", "sheet", "tabulka", "xlsx"},
+    "poscilogramar": {"poscilogramar", "logic_analyzer", "logic analyzer", "logicky analyzator", "oscillogram", "waveform"},
 }
 
 META_FILE_NAMES = ("metadata.json", "manifest.json", "meta.json")
@@ -142,7 +145,12 @@ TITLE_KEYS = ("title", "nazev", "název", "name")
 # (pisar.py, prezentar.py, pocitar.py) spuštěný aktuálním Pythonem.
 # Přepsat jde cestou k .exe nebo příkazem, např.:
 #   APP_LAUNCHERS = {"pisar": r"C:\VLCR\Pisar.exe"}
-APP_SCRIPTS = {"pisar": "pisar.py", "prezentar": "prezentar.py", "pocitar": "pocitar.py"}
+APP_SCRIPTS = {
+    "pisar": "pisar.py",
+    "prezentar": "prezentar.py",
+    "pocitar": "pocitar.py",
+    "poscilogramar": "poscilogramar.py",
+}
 APP_LAUNCHERS = {}
 
 
@@ -333,12 +341,25 @@ def new_presentation_bytes(title):
     return _container_bytes(b"VLCRPREZ", meta, {"slides": [slide], "assets": {}})
 
 
+def new_poscilogramar_bytes(title):
+    """Prázdný pracovní soubor Poscilogramáře ve stejném VLČR kontejneru."""
+    meta = {"app": "poscilogramar", "application": "logic_analyzer", "aplikace": "logický analyzátor",
+            "editor": "poscilogramar", "type": "logic_analyzer", "format": "vlcr",
+            "container_format": "VLCRPOSC", "container_version": CONTAINER_VERSION,
+            "generator": "VLČR Průzkumník " + APP_VERSION, "title": title, "created": _now_iso(),
+            "modified": _now_iso(), "channel_count": 1, "content_encoding": "zlib+json"}
+    payload = {"time_unit_index": 9, "max_ticks": 200, "transition_unit": "ns",
+               "channels": [{"name": "CH 1", "color": "#00FF66", "transitions": []}]}
+    return _container_bytes(b"VLCRPOSC", meta, payload)
+
+
 # (klíč aplikace, text v nabídce, výchozí název, funkce vytvářející obsah nebo None)
 # Písař: formát souboru zatím není doplněn - položka je v nabídce neaktivní.
 NEW_FILE_TYPES = [
     ("pisar", "Dokument (Písař)", "Nový dokument", None),
     ("pocitar", "Tabulka (Počítář)", "Nová tabulka", new_spreadsheet_bytes),
     ("prezentar", "Prezentace (Prezentář)", "Nová prezentace", new_presentation_bytes),
+    ("poscilogramar", "Logický analyzátor (Poscilogramář)", "Nový oscilogram", new_poscilogramar_bytes),
 ]
 
 

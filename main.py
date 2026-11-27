@@ -60,7 +60,7 @@ def application_dir():
 # ============================================================
 
 APP_NAME = "VLČR Kancelář"
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.1.1"
 
 GITHUB_REPO = "chznhs-spec/kancelar"
 UPDATES_ENABLED = True
@@ -177,6 +177,7 @@ APPS = [
     ("pisar", "Písař", "pisar.png", "#00A300", "pisar.py"),
     ("prezentar", "Prezentář", "prezenter.png", "#2D89EF", "prezentar.py"),
     ("pocitar", "Počítář", "pocitar.png", "#DA532C", "pocitar.py"),
+    ("poscilogramar", "Poscilogramář", "poscilogramar.png", "#00A85A", "poscilogramar.py"),
 ]
 
 

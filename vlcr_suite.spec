@@ -55,9 +55,14 @@ datas.append((pruzkumnik_path, "."))
 # PyInstaller obvykle lokální import vlcr_format zachytí automaticky.
 # Následující importy jsou používány dynamicky nebo Qt pluginy.
 hiddenimports = [
+    "pruzkumnik",
+    "uuid",
     "zipfile",
     "subprocess",
-    "struct",
+    "struct",Soubor pruzkumnik.py byl nalezen, ale jeho načtení selhalo. Podrobnosti:
+• /opt/vlcr-kancelar/_internal/pruzkumnik.py: ModuleNotFoundError: No module named 'uuid'
+
+Zkontrolujte také, zda jsou v PyInstalleru zahrnuté importy Průzkumníka
     "unicodedata",
     "zlib",
     "json",

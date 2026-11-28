@@ -8,6 +8,7 @@ import os
 import sys
 import math
 import importlib.util
+import traceback
 from bisect import bisect_left
 from copy import deepcopy
 
@@ -57,51 +58,99 @@ WIN_DARK = "#404040"
 WIN_SHADOW = "#808080"
 WIN_LIGHT = "#FFFFFF"
 
-
 _EXPLORER_DIALOG_CLASS = None
 
+
 def _load_file_explorer_dialog_class():
-    """Načte dialog VLČR Průzkumníku ze zdrojové i PyInstaller verze."""
+    """Načte dialog VLČR Průzkumníku ze zdrojové i PyInstaller verze.
+
+    PyInstaller 6 ukládá přibalené datové soubory do _internal. Soubor proto
+    hledáme také přes sys._MEIPASS a vedle spustitelného souboru. Pokud soubor
+    existuje, ale jeho import selže (např. kvůli chybějící závislosti), vrátíme
+    skutečnou příčinu místo zavádějící zprávy, že soubor nebyl nalezen.
+    """
     global _EXPLORER_DIALOG_CLASS
     if _EXPLORER_DIALOG_CLASS is not None:
         return _EXPLORER_DIALOG_CLASS
 
-    candidates = [os.path.join(BASE_DIR, "pruzkumnik.py")]
+    module_name = "pruzkumnik"
+    already_loaded = sys.modules.get(module_name)
+    if already_loaded is not None:
+        dialog_class = getattr(already_loaded, "FileExplorerDialog", None)
+        if dialog_class is not None:
+            _EXPLORER_DIALOG_CLASS = dialog_class
+            return dialog_class
+
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
     meipass = getattr(sys, "_MEIPASS", None)
+
+    candidates = []
     if meipass:
         candidates.append(os.path.join(meipass, "pruzkumnik.py"))
-    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
-    candidates.extend([
-        os.path.join(exe_dir, "pruzkumnik.py"),
+    candidates.append(os.path.join(BASE_DIR, "pruzkumnik.py"))
+    candidates.extend((
         os.path.join(exe_dir, "_internal", "pruzkumnik.py"),
-    ])
+        os.path.join(exe_dir, "pruzkumnik.py"),
+        os.path.join(os.getcwd(), "pruzkumnik.py"),
+    ))
 
+    unique_candidates = []
     seen = set()
-    for path in candidates:
-        path = os.path.abspath(path)
-        if path in seen or not os.path.isfile(path):
-            continue
-        seen.add(path)
-        spec = importlib.util.spec_from_file_location(
-            "_vlcr_embedded_pruzkumnik", path
-        )
+    for candidate in candidates:
+        candidate = os.path.abspath(candidate)
+        if candidate not in seen:
+            seen.add(candidate)
+            unique_candidates.append(candidate)
+
+    existing_files = [path for path in unique_candidates if os.path.isfile(path)]
+    errors = []
+
+    for path in existing_files:
+        module_dir = os.path.dirname(path)
+        # Modul Průzkumníka může importovat další lokální moduly ze stejné
+        # složky. Přidáme ji do sys.path pouze jednou.
+        if module_dir not in sys.path:
+            sys.path.insert(0, module_dir)
+
+        spec = importlib.util.spec_from_file_location(module_name, path)
         if spec is None or spec.loader is None:
+            errors.append(f"{path}: Python pro tento soubor nevytvořil importní spec.")
             continue
+
         module = importlib.util.module_from_spec(spec)
-        sys.modules[spec.name] = module
+        previous_module = sys.modules.get(module_name)
+        sys.modules[module_name] = module
+
         try:
             spec.loader.exec_module(module)
             dialog_class = getattr(module, "FileExplorerDialog", None)
-            if dialog_class is not None:
-                _EXPLORER_DIALOG_CLASS = dialog_class
-                return dialog_class
-        except Exception:
-            sys.modules.pop(spec.name, None)
-            continue
+            if dialog_class is None:
+                raise AttributeError(
+                    "Modul se načetl, ale neobsahuje třídu FileExplorerDialog."
+                )
 
+            _EXPLORER_DIALOG_CLASS = dialog_class
+            return dialog_class
+
+        except Exception as exc:
+            detail = "".join(traceback.format_exception_only(type(exc), exc)).strip()
+            errors.append(f"{path}: {detail}")
+            if previous_module is not None:
+                sys.modules[module_name] = previous_module
+            else:
+                sys.modules.pop(module_name, None)
+
+    if existing_files:
+        details = "\n".join(f"• {item}" for item in errors)
+        raise RuntimeError(
+            "Soubor pruzkumnik.py byl nalezen, ale jeho načtení selhalo. "
+            "Podrobnosti:\n" + details + "\n\n"
+            "Zkontrolujte také, zda jsou v PyInstalleru zahrnuté importy Průzkumníka."
+        )
+
+    searched = "\n".join(f"• {path}" for path in unique_candidates)
     raise RuntimeError(
-        "Nelze načíst VLČR Průzkumník. Soubor pruzkumnik.py musí být "
-        "vedle aplikace nebo přibalený v adresáři _internal."
+        "Soubor pruzkumnik.py nebyl nalezen. Prohledaná umístění:\n" + searched
     )
 
 
@@ -125,6 +174,18 @@ def retro_button_style() -> str:
 
 class WaveformCanvas(QAbstractScrollArea):
     """Vykreslovací plocha s pevnými popisky a posuvným časovým průběhem."""
+
+    from PyQt5.QtCore import pyqtSignal as _pyqtSignal
+
+    channelSelected = _pyqtSignal(int)
+    waveformChanged = _pyqtSignal()
+    renameRequested = _pyqtSignal(int)
+    zoomRequested = _pyqtSignal(int)
+    textRequested = _pyqtSignal(int, int, bool)
+    arrowCreated = _pyqtSignal(int, int, int, int)
+    annotationsChanged = _pyqtSignal()
+    editTextRequested = _pyqtSignal(int)
+    gridChanged = _pyqtSignal(int)
 
     GUTTER = 138
     RULER_H = 28
@@ -967,7 +1028,7 @@ class WaveformCanvas(QAbstractScrollArea):
                     continue
 
                 # Dlouhý komentář: karta s nadpisem a rozbalovacím popisem.
-                fill = QColor( "#3C3C3C")
+                fill = QColor("#3C3C3C")
                 if not fill.isValid():
                     fill = QColor("#252525")
                 fill.setAlpha(238)
@@ -1391,18 +1452,6 @@ class WaveformCanvas(QAbstractScrollArea):
 
         painter.restore()
 
-    from PyQt5.QtCore import pyqtSignal as _pyqtSignal
-
-    channelSelected = _pyqtSignal(int)
-    waveformChanged = _pyqtSignal()
-    renameRequested = _pyqtSignal(int)
-    zoomRequested = _pyqtSignal(int)
-    textRequested = _pyqtSignal(int, int, bool)
-    arrowCreated = _pyqtSignal(int, int, int, int)
-    annotationsChanged = _pyqtSignal()
-    editTextRequested = _pyqtSignal(int)
-    gridChanged = _pyqtSignal(int)
-
 
 class PoscilogramarWindow(QMainWindow):
     def __init__(self, open_path=None):
@@ -1468,8 +1517,6 @@ class PoscilogramarWindow(QMainWindow):
         sidebar_scroll.setFixedWidth(222)
 
         body.addWidget(sidebar_scroll)
-
-       
 
         side.addWidget(self._sunken_separator())
 
@@ -2691,16 +2738,7 @@ def main():
     app.setApplicationName(APP_NAME)
     app.setOrganizationName("VLCR")
 
-
-
-
-
     app.setDesktopFileName("vlcr-poscilogramar")
-
-
-
-
-
     app.setFont(QFont("Tahoma", 9))
 
     if os.path.isfile(LOGO_PATH):

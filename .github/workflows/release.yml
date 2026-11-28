@@ -37,7 +37,7 @@ jobs:
         run: |
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          for f in main.py pisar.py pocitar.py prezentar.py pruzkumnik.py vlcr_kancelar_setup.py; do
+          for f in main.py pisar.py pocitar.py prezentar.py pruzkumnik.py poscilogramar.py vlcr_kancelar_setup.py; do
             if [ -f "$f" ]; then sed -i -E "s/^APP_VERSION = .*/APP_VERSION = \"$V\"/" "$f"; fi
           done
           echo "Verze: $V"
@@ -78,7 +78,7 @@ jobs:
         shell: bash
         run: |
           pyinstaller --noconfirm --clean vlcr_suite.spec
-          for exe in vlcr-kancelar pisar pocitar prezentar pruzkumnik; do
+          for exe in vlcr-kancelar pisar pocitar prezentar pruzkumnik poscilogramar; do
             test -f "dist/vlcr-kancelar/$exe.exe" || { echo "CHYBÍ $exe.exe"; exit 1; }
           done
           ls -la dist/vlcr-kancelar
@@ -138,7 +138,7 @@ jobs:
         run: |
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
-          for f in main.py pisar.py pocitar.py prezentar.py pruzkumnik.py; do
+          for f in main.py pisar.py pocitar.py prezentar.py pruzkumnik.py poscilogramar.py; do
             if [ -f "$f" ]; then sed -i -E "s/^APP_VERSION = .*/APP_VERSION = \"$V\"/" "$f"; fi
           done
           echo "Verze: $V"
@@ -156,7 +156,7 @@ jobs:
       - name: Sestavit celou sadu (jeden společný adresář)
         run: |
           pyinstaller --noconfirm --clean vlcr_suite.spec
-          for exe in vlcr-kancelar pisar pocitar prezentar pruzkumnik; do
+          for exe in vlcr-kancelar pisar pocitar prezentar pruzkumnik poscilogramar; do
             test -x "dist/vlcr-kancelar/$exe" || { echo "CHYBÍ $exe"; exit 1; }
           done
           dist/vlcr-kancelar/pocitar --version
@@ -232,6 +232,7 @@ jobs:
           rpm -qi vlcr-kancelar
           test -x /opt/vlcr-kancelar/vlcr-kancelar
           test -x /opt/vlcr-kancelar/pocitar
+          test -x /opt/vlcr-kancelar/poscilogramar
           ls /usr/share/applications/ | grep vlcr
           zypper --non-interactive remove vlcr-kancelar
           test ! -e /opt/vlcr-kancelar
@@ -356,6 +357,7 @@ jobs:
           dpkg -s vlcr-kancelar
           test -x /opt/vlcr-kancelar/vlcr-kancelar
           test -x /opt/vlcr-kancelar/pocitar
+          test -x /opt/vlcr-kancelar/poscilogramar
           ls /usr/share/applications | grep vlcr
           apt-get remove -y vlcr-kancelar
           test ! -e /opt/vlcr-kancelar
@@ -391,7 +393,7 @@ jobs:
           if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then V="${GITHUB_REF_NAME#v}"; else V="0.0.0-dev"; fi
           echo "version=$V" >> "$GITHUB_OUTPUT"
           # přenositelný zápis (sed -i se na macOS chová jinak než na Linuxu)
-          for f in main.py pisar.py pocitar.py prezentar.py pruzkumnik.py; do
+          for f in main.py pisar.py pocitar.py prezentar.py pruzkumnik.py poscilogramar.py; do
             if [ -f "$f" ]; then
               sed -E "s/^APP_VERSION = .*/APP_VERSION = \"$V\"/" "$f" > "$f.tmp" && mv "$f.tmp" "$f"
             fi
@@ -430,7 +432,7 @@ jobs:
           pyinstaller --noconfirm --clean vlcr_suite.spec
           APP="dist/VLCR Kancelar.app"
           test -d "$APP" || { echo "CHYBÍ $APP"; ls -la dist; exit 1; }
-          for exe in vlcr-kancelar pisar pocitar prezentar pruzkumnik; do
+          for exe in vlcr-kancelar pisar pocitar prezentar pruzkumnik poscilogramar; do
             if [ ! -f "$APP/Contents/MacOS/$exe" ]; then
               echo "CHYBÍ $exe v $APP/Contents/MacOS"
               find "$APP" -maxdepth 3 | head -60

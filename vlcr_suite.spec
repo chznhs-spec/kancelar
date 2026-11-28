@@ -20,7 +20,9 @@ PROGRAMS = [
 ]
 
 # Data dostupná všem programům v adresáři _internal.
-datas = []
+datas = [
+    ("pruzkumnik.py", "."),
+],
 for folder in ("images", "loga"):
     path = os.path.join(SPECPATH, folder)
     if os.path.isdir(path):

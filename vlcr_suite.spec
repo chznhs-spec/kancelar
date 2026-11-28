@@ -59,10 +59,7 @@ hiddenimports = [
     "uuid",
     "zipfile",
     "subprocess",
-    "struct",Soubor pruzkumnik.py byl nalezen, ale jeho načtení selhalo. Podrobnosti:
-• /opt/vlcr-kancelar/_internal/pruzkumnik.py: ModuleNotFoundError: No module named 'uuid'
-
-Zkontrolujte také, zda jsou v PyInstalleru zahrnuté importy Průzkumníka
+    "struct",
     "unicodedata",
     "zlib",
     "json",

@@ -1,3 +1,4 @@
+
 # -*- mode: python ; coding: utf-8 -*-
 """Společné sestavení celé sady VLČR Kancelář (PyInstaller >= 6).
 
@@ -6,8 +7,10 @@ které sdílejí společnou složku _internal s Pythonem a knihovnami.
 
 Spuštění: pyinstaller --noconfirm --clean vlcr_suite.spec
 """
+
 import os
 import sys
+
 
 # (vstupní skript, název výsledného programu)
 PROGRAMS = [
@@ -19,39 +22,80 @@ PROGRAMS = [
     ("poscilogramar.py", "poscilogramar"),
 ]
 
-# Data dostupná všem programům v adresáři _internal.
-datas = [
-    ("pruzkumnik.py", "."),
-],
+
+# ===========================================================================
+# DATA DOSTUPNÁ VŠEM PROGRAMŮM V ADRESÁŘI _internal
+# ===========================================================================
+
+datas = []
+
+# Společné datové složky.
 for folder in ("images", "loga"):
     path = os.path.join(SPECPATH, folder)
     if os.path.isdir(path):
         datas.append((path, folder))
 
-# Průzkumník je za běhu načítán i dynamicky z ostatních aplikací.
+
+# Průzkumník je za běhu načítán také dynamicky z ostatních aplikací.
+# Proto musí být jeho zdrojový soubor přibalený mezi datovými soubory.
 pruzkumnik_path = os.path.join(SPECPATH, "pruzkumnik.py")
-if os.path.isfile(pruzkumnik_path):
-    datas.append((pruzkumnik_path, "."))
+
+if not os.path.isfile(pruzkumnik_path):
+    raise FileNotFoundError(
+        f"Chybí zdrojový soubor Průzkumníka: {pruzkumnik_path}"
+    )
+
+datas.append((pruzkumnik_path, "."))
+
+
+# ===========================================================================
+# DYNAMICKÉ IMPORTY A QT MODULY
+# ===========================================================================
 
 # PyInstaller obvykle lokální import vlcr_format zachytí automaticky.
 # Následující importy jsou používány dynamicky nebo Qt pluginy.
 hiddenimports = [
-    "zipfile", "subprocess", "struct", "unicodedata", "zlib", "json", "csv",
-    "importlib.util", "statistics", "decimal", "html", "tempfile", "base64",
-    "PyQt5.QtPrintSupport", "PyQt5.sip",
+    "zipfile",
+    "subprocess",
+    "struct",
+    "unicodedata",
+    "zlib",
+    "json",
+    "csv",
+    "importlib.util",
+    "statistics",
+    "decimal",
+    "html",
+    "tempfile",
+    "base64",
+    "PyQt5.QtPrintSupport",
+    "PyQt5.sip",
 ]
 
+
+# ===========================================================================
+# IKONY
+# ===========================================================================
 
 def icon_for(name):
     path = os.path.join(SPECPATH, "build_icons", name + ".ico")
     return path if sys.platform == "win32" and os.path.isfile(path) else None
 
 
-analyses, exes = [], []
+# ===========================================================================
+# SESTAVENÍ JEDNOTLIVÝCH PROGRAMŮ
+# ===========================================================================
+
+analyses = []
+exes = []
+
 for script, name in PROGRAMS:
     script_path = os.path.join(SPECPATH, script)
+
     if not os.path.isfile(script_path):
-        raise SystemExit("CHYBÍ POVINNÝ SOUBOR APLIKACE: " + script)
+        raise SystemExit(
+            "CHYBÍ POVINNÝ SOUBOR APLIKACE: " + script
+        )
 
     a = Analysis(
         [script],
@@ -61,10 +105,18 @@ for script, name in PROGRAMS:
         hiddenimports=hiddenimports,
         hookspath=[],
         runtime_hooks=[],
-        excludes=["tkinter", "matplotlib", "numpy", "scipy", "pandas"],
+        excludes=[
+            "tkinter",
+            "matplotlib",
+            "numpy",
+            "scipy",
+            "pandas",
+        ],
         noarchive=False,
     )
+
     pyz = PYZ(a.pure)
+
     exe = EXE(
         pyz,
         a.scripts,
@@ -75,12 +127,23 @@ for script, name in PROGRAMS:
         icon=icon_for(name),
         upx=False,
     )
+
     analyses.append(a)
     exes.append(exe)
 
+
+# ===========================================================================
+# SPOLEČNÝ VÝSLEDNÝ ADRESÁŘ
+# ===========================================================================
+
 collect_args = []
+
 for analysis, exe in zip(analyses, exes):
-    collect_args += [exe, analysis.binaries, analysis.datas]
+    collect_args += [
+        exe,
+        analysis.binaries,
+        analysis.datas,
+    ]
 
 coll = COLLECT(
     *collect_args,
@@ -89,9 +152,20 @@ coll = COLLECT(
     name="vlcr-kancelar",
 )
 
-# macOS: všechny spustitelné programy jsou v Contents/MacOS vedle sebe.
+
+# ===========================================================================
+# macOS: APLIKACE VLČR KANCELÁŘ
+# ===========================================================================
+
+# Všechny spustitelné programy jsou v Contents/MacOS vedle sebe.
 if sys.platform == "darwin":
-    icns = os.path.join(SPECPATH, "build_icons", "vlcr-kancelar.icns")
+
+    icns = os.path.join(
+        SPECPATH,
+        "build_icons",
+        "vlcr-kancelar.icns",
+    )
+
     app = BUNDLE(
         coll,
         name="VLCR Kancelar.app",
@@ -100,8 +174,14 @@ if sys.platform == "darwin":
         info_plist={
             "CFBundleName": "VLČR Kancelář",
             "CFBundleDisplayName": "VLČR Kancelář",
-            "CFBundleShortVersionString": os.environ.get("VLCR_VERSION", "0.0.0"),
-            "CFBundleVersion": os.environ.get("VLCR_VERSION", "0.0.0"),
+            "CFBundleShortVersionString": os.environ.get(
+                "VLCR_VERSION",
+                "0.0.0",
+            ),
+            "CFBundleVersion": os.environ.get(
+                "VLCR_VERSION",
+                "0.0.0",
+            ),
             "NSHighResolutionCapable": True,
             "LSMinimumSystemVersion": "11.0",
         },

@@ -23,7 +23,8 @@ from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QLabel,
     QFrame, QPushButton, QLineEdit, QListWidget, QListWidgetItem, QTreeView,
     QFileSystemModel, QFileIconProvider, QMessageBox, QShortcut, QHeaderView,
-    QAbstractItemView, QScrollArea, QGridLayout, QStackedWidget, QMenu, QInputDialog
+    QAbstractItemView, QScrollArea, QGridLayout, QStackedWidget, QMenu, QInputDialog,
+    QDialog, QDialogButtonBox
 )
 from PyQt5.QtCore import (
     Qt, QDir, QFileInfo, QSize, QStandardPaths, QSettings, QPointF, QTimer,
@@ -349,6 +350,7 @@ def new_poscilogramar_bytes(title):
             "generator": "VLČR Průzkumník " + APP_VERSION, "title": title, "created": _now_iso(),
             "modified": _now_iso(), "channel_count": 1, "content_encoding": "zlib+json"}
     payload = {"time_unit_index": 9, "max_ticks": 200, "transition_unit": "ns",
+               "annotation_grid_px": 19, "annotations": [],
                "channels": [{"name": "CH 1", "color": "#00FF66", "transitions": []}]}
     return _container_bytes(b"VLCRPOSC", meta, payload)
 
@@ -1226,6 +1228,146 @@ class FileExplorerWidget(QWidget):
 
     def _set_status(self, text):
         self.lbl_status.setText(text)
+
+
+class _PickerExplorerWidget(FileExplorerWidget):
+    """Průzkumník použitý jako výběrové okno; soubor sám nespouští."""
+
+    fileActivated = pyqtSignal(str)
+
+    def _open_path(self, path, is_dir):
+        if is_dir:
+            self.navigate(path)
+        else:
+            self.fileActivated.emit(path)
+
+    def selected_path(self):
+        """Vrátí aktuálně vybraný soubor .vlcr, případně prázdný řetězec."""
+        if self.view_mode == VIEW_TILES:
+            selected = getattr(self.tile_view, "_selected", None)
+            if selected is not None and not selected.is_dir:
+                return selected.path
+            return ""
+
+        rows = self.view.selectionModel().selectedRows(0)
+        if not rows:
+            return ""
+
+        index = rows[0]
+        if self.model.isDir(index):
+            return ""
+        return self.model.filePath(index)
+
+
+class FileExplorerDialog(QDialog):
+    """Modální dialog pro otevření/uložení .vlcr ve vzhledu VLČR Průzkumníku.
+
+    mode='open' vrací vybraný existující soubor. mode='save' vrací cestu
+    vytvořenou z aktuální složky a názvu souboru.
+    """
+
+    def __init__(self, mode="open", parent=None, start_path=None,
+                 initial_name="Oscilogram.vlcr"):
+        super().__init__(parent)
+        if mode not in ("open", "save"):
+            raise ValueError("Neplatný režim Průzkumníku.")
+
+        self.mode = mode
+        self.selected_path = ""
+        self.setWindowTitle(
+            "Otevřít pracovní soubor – VLČR Průzkumník"
+            if mode == "open"
+            else "Uložit pracovní soubor – VLČR Průzkumník"
+        )
+        self.resize(980, 650)
+        self.setMinimumSize(760, 500)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        self.explorer = _PickerExplorerWidget(
+            base_dir=BASE_DIR,
+            title="Vyberte pracovní soubor .vlcr" if mode == "open"
+                  else "Vyberte cílovou složku",
+            start_path=start_path,
+            parent=self
+        )
+        self.explorer.fileActivated.connect(self._on_file_activated)
+        self.explorer.tile_view.selection_changed.connect(
+            self._on_selection_changed
+        )
+        self.explorer.view.selectionModel().selectionChanged.connect(
+            self._on_selection_changed
+        )
+        layout.addWidget(self.explorer, 1)
+
+        self.name_edit = None
+        if mode == "save":
+            row = QHBoxLayout()
+            row.addWidget(QLabel("Název souboru:"))
+            self.name_edit = QLineEdit(initial_name)
+            self.name_edit.setPlaceholderText("Název.vlcr")
+            row.addWidget(self.name_edit, 1)
+            layout.addLayout(row)
+
+        buttons = QDialogButtonBox(
+            (QDialogButtonBox.Open if mode == "open" else QDialogButtonBox.Save)
+            | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(self._accept_selection)
+        buttons.rejected.connect(self.reject)
+        layout.addWidget(buttons)
+
+    def _on_selection_changed(self, *_):
+        if self.mode == "save" and self.name_edit is not None:
+            path = self.explorer.selected_path()
+            if path:
+                self.name_edit.setText(os.path.basename(path))
+
+    def _on_file_activated(self, path):
+        if self.mode == "open":
+            self.selected_path = os.path.abspath(path)
+            self.accept()
+        elif self.name_edit is not None:
+            self.name_edit.setText(os.path.basename(path))
+
+    def _accept_selection(self):
+        if self.mode == "open":
+            path = self.explorer.selected_path()
+            if not path or not os.path.isfile(path):
+                QMessageBox.information(
+                    self, "Otevřít soubor",
+                    "Nejprve vyberte pracovní soubor .vlcr."
+                )
+                return
+            self.selected_path = os.path.abspath(path)
+            self.accept()
+            return
+
+        name = self.name_edit.text().strip() if self.name_edit else ""
+        name = safe_name(name)
+        if not name:
+            QMessageBox.information(
+                self, "Uložit soubor", "Zadejte název pracovního souboru."
+            )
+            return
+        if not name.lower().endswith(".vlcr"):
+            name += ".vlcr"
+
+        path = os.path.abspath(os.path.join(self.explorer._current, name))
+        if os.path.exists(path):
+            answer = QMessageBox.question(
+                self, "Přepsat soubor?",
+                f"Soubor {os.path.basename(path)} již existuje. Chcete jej přepsat?",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No
+            )
+            if answer != QMessageBox.Yes:
+                return
+
+        self.selected_path = path
+        self.accept()
 
 
 # ---------------------------------------------------------------------------

@@ -7,17 +7,20 @@ from __future__ import annotations
 import os
 import sys
 import math
+import importlib.util
 from bisect import bisect_left
 from copy import deepcopy
 
 from PyQt5.QtCore import Qt, QPoint, QPointF, QSize, QRectF
 from PyQt5.QtGui import (
     QColor, QFont, QIcon, QKeySequence, QPainter, QPen, QImage,
+    QTextDocument, QTextOption, QTextCursor, QTextCharFormat, QBrush,
 )
 from PyQt5.QtWidgets import (
     QApplication, QAbstractScrollArea, QAction, QButtonGroup, QColorDialog,
     QFrame, QFileDialog, QHBoxLayout, QLabel, QMainWindow, QMessageBox,
     QPushButton, QShortcut, QVBoxLayout, QWidget, QInputDialog, QMenu, QScrollArea,
+    QDialog, QDialogButtonBox, QFormLayout, QLineEdit, QTextEdit, QToolButton,
 )
 from PyQt5.QtPrintSupport import QPrinter
 from PyQt5.QtSvg import QSvgGenerator
@@ -55,6 +58,53 @@ WIN_SHADOW = "#808080"
 WIN_LIGHT = "#FFFFFF"
 
 
+_EXPLORER_DIALOG_CLASS = None
+
+def _load_file_explorer_dialog_class():
+    """Načte dialog VLČR Průzkumníku ze zdrojové i PyInstaller verze."""
+    global _EXPLORER_DIALOG_CLASS
+    if _EXPLORER_DIALOG_CLASS is not None:
+        return _EXPLORER_DIALOG_CLASS
+
+    candidates = [os.path.join(BASE_DIR, "pruzkumnik.py")]
+    meipass = getattr(sys, "_MEIPASS", None)
+    if meipass:
+        candidates.append(os.path.join(meipass, "pruzkumnik.py"))
+    exe_dir = os.path.dirname(os.path.abspath(sys.executable))
+    candidates.extend([
+        os.path.join(exe_dir, "pruzkumnik.py"),
+        os.path.join(exe_dir, "_internal", "pruzkumnik.py"),
+    ])
+
+    seen = set()
+    for path in candidates:
+        path = os.path.abspath(path)
+        if path in seen or not os.path.isfile(path):
+            continue
+        seen.add(path)
+        spec = importlib.util.spec_from_file_location(
+            "_vlcr_embedded_pruzkumnik", path
+        )
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+            dialog_class = getattr(module, "FileExplorerDialog", None)
+            if dialog_class is not None:
+                _EXPLORER_DIALOG_CLASS = dialog_class
+                return dialog_class
+        except Exception:
+            sys.modules.pop(spec.name, None)
+            continue
+
+    raise RuntimeError(
+        "Nelze načíst VLČR Průzkumník. Soubor pruzkumnik.py musí být "
+        "vedle aplikace nebo přibalený v adresáři _internal."
+    )
+
+
 def retro_button_style() -> str:
     return """
         QPushButton {
@@ -87,6 +137,7 @@ class WaveformCanvas(QAbstractScrollArea):
         self.selected_index = 0
         self.time_unit_index = DEFAULT_TIME_UNIT_INDEX
         self.tool = "paint"
+        self.annotation_grid_px = 19
 
         self.annotations = []
         self.selected_annotation_index = None
@@ -100,6 +151,7 @@ class WaveformCanvas(QAbstractScrollArea):
         self._drag_start_pos = None
         self._drag_original = None
         self._drag_changed = False
+        self._pending_annotation_action = None
 
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -124,15 +176,29 @@ class WaveformCanvas(QAbstractScrollArea):
         self._update_scrollbars()
         self.viewport().update()
 
+    def set_annotation_grid_px(self, value):
+        self.annotation_grid_px = max(2, min(152, int(value)))
+        self.viewport().update()
+
+    def adjust_annotation_grid(self, finer):
+        if finer:
+            value = max(2, self.annotation_grid_px // 2)
+        else:
+            value = min(152, self.annotation_grid_px * 2)
+        if value != self.annotation_grid_px:
+            self.set_annotation_grid_px(value)
+            self.gridChanged.emit(value)
+
     def set_tool(self, tool):
         self.tool = tool
         self.pending_arrow = None
         self._drag_annotation_index = None
         self._drag_part = None
+        self._pending_annotation_action = None
 
         if tool == "pan":
             self.viewport().setCursor(Qt.OpenHandCursor)
-        elif tool in ("text", "arrow", "paint"):
+        elif tool in ("text", "long_text", "arrow", "paint"):
             self.viewport().setCursor(Qt.CrossCursor)
         else:
             self.viewport().setCursor(Qt.ArrowCursor)
@@ -215,9 +281,12 @@ class WaveformCanvas(QAbstractScrollArea):
 
         for annotation in self.annotations:
             if annotation.get("kind") == "text":
+                annotation_height = self._text_annotation_layout(
+                    annotation, 0, 0
+                )[0].height()
                 content_height = max(
                     content_height,
-                    int(annotation.get("y", self.RULER_H)) + 260
+                    int(annotation.get("y", self.RULER_H) + annotation_height + 12)
                 )
             elif annotation.get("kind") == "arrow":
                 content_height = max(
@@ -286,6 +355,20 @@ class WaveformCanvas(QAbstractScrollArea):
             )
         )
 
+    def _snap_annotation_point(self, x_ns, y):
+        """Zarovná bod anotace na neviditelnou mřížku v aktuálním zoomu."""
+        grid_px = max(2, int(self.annotation_grid_px))
+        step_ns = max(
+            1,
+            int(round(self._unit_ns() * grid_px / self.PX_PER_DIV))
+        )
+        snapped_x = int(round(float(x_ns) / step_ns) * step_ns)
+        snapped_x = max(0, min(MAX_TIMELINE_NS, snapped_x))
+
+        relative_y = max(0, int(y) - self.RULER_H)
+        snapped_y = self.RULER_H + int(round(relative_y / grid_px) * grid_px)
+        return snapped_x, snapped_y
+
     def _content_y_at(self, y):
         return max(
             self.RULER_H,
@@ -333,7 +416,35 @@ class WaveformCanvas(QAbstractScrollArea):
             point.y() - projection.y()
         )
 
-    def _text_annotation_rect(
+    @staticmethod
+    def _is_long_text_annotation(annotation):
+        """Rozpozná dlouhý komentář; zachová i soubory z předchozí verze."""
+        return (
+            annotation.get("comment_type") == "long"
+            or annotation.get("mode") == "long"
+            or bool(annotation.get("expandable", False))
+        )
+
+    @staticmethod
+    def _wrapped_text_document(text, font, width, color=None):
+        """Připraví dokument se zalamováním i dlouhých slov a volitelnou barvou."""
+        document = QTextDocument()
+        document.setDocumentMargin(0)
+        document.setDefaultFont(font)
+        option = document.defaultTextOption()
+        option.setWrapMode(QTextOption.WrapAtWordBoundaryOrAnywhere)
+        document.setDefaultTextOption(option)
+        document.setPlainText(str(text))
+        if color is not None:
+            cursor = QTextCursor(document)
+            cursor.select(QTextCursor.Document)
+            char_format = QTextCharFormat()
+            char_format.setForeground(QBrush(QColor(color)))
+            cursor.mergeCharFormat(char_format)
+        document.setTextWidth(max(1.0, float(width)))
+        return document
+
+    def _text_annotation_layout(
         self,
         annotation,
         horizontal_offset=None,
@@ -341,7 +452,6 @@ class WaveformCanvas(QAbstractScrollArea):
     ):
         if horizontal_offset is None:
             horizontal_offset = self.horizontalScrollBar().value()
-
         if vertical_offset is None:
             vertical_offset = self.verticalScrollBar().value()
 
@@ -351,28 +461,70 @@ class WaveformCanvas(QAbstractScrollArea):
             * self.PX_PER_DIV
             - horizontal_offset
         )
-
         y = float(annotation.get("y", self.RULER_H)) - vertical_offset
-
-        font = QFont(
-            "Tahoma",
-            int(annotation.get("font_size", 10)),
-            QFont.Bold
-        )
 
         from PyQt5.QtGui import QFontMetrics
 
-        metrics = QFontMetrics(font)
+        font_size = max(6, min(96, int(annotation.get("font_size", 10))))
         text = str(annotation.get("text", ""))
+        long_comment = self._is_long_text_annotation(annotation)
 
-        bounds = metrics.boundingRect(
-            0, 0, 360, 240, Qt.TextWordWrap, text
+        if not long_comment:
+            # Klasická poznámka je skutečně jen text bez rámečku a šipky.
+            font = QFont("Tahoma", font_size)
+            metrics = QFontMetrics(font)
+            bounds = metrics.boundingRect(
+                0, 0, 480, 10000, Qt.TextWordWrap, text
+            )
+            width = max(24, min(480, bounds.width() + 4))
+            height = max(metrics.height(), bounds.height()) + 4
+            return QRectF(x, y, width, height), height
+
+        # Dlouhý komentář má samostatný nadpis a rozbalitelný popis.
+        # Výška se měří QTextDocumentem se stejnou šířkou, jakou dostane
+        # vykreslení. Tím se zabrání oříznutí vícerádkového popisu.
+        title_font = QFont("Tahoma", font_size, QFont.Bold)
+        title_metrics = QFontMetrics(title_font)
+        longest_title_line = max(
+            (title_metrics.width(line) for line in text.splitlines()),
+            default=0
         )
+        width = max(170, min(440, longest_title_line + 58))
+        title_width = max(90, width - 42)
+        title_document = self._wrapped_text_document(
+            text, title_font, title_width
+        )
+        title_height = math.ceil(title_document.size().height())
+        header_height = max(
+            34,
+            title_height + 12
+        )
+        height = header_height
 
-        width = max(55, min(370, bounds.width() + 14))
-        height = max(metrics.height() + 10, bounds.height() + 12)
+        description = str(annotation.get("description", ""))
+        if annotation.get("expanded", False) and description:
+            desc_font = QFont("Tahoma", max(8, font_size - 1))
+            desc_width = max(80, width - 18)
+            desc_document = self._wrapped_text_document(
+                description, desc_font, desc_width
+            )
+            description_height = max(
+                QFontMetrics(desc_font).height(),
+                math.ceil(desc_document.size().height())
+            ) + 20
+            height += description_height
 
-        return QRectF(x, y, width, height)
+        return QRectF(x, y, width, height), header_height
+
+    def _text_annotation_rect(
+        self,
+        annotation,
+        horizontal_offset=None,
+        vertical_offset=None
+    ):
+        return self._text_annotation_layout(
+            annotation, horizontal_offset, vertical_offset
+        )[0]
 
     def _hit_test_annotation(self, position):
         point = QPointF(position)
@@ -382,7 +534,12 @@ class WaveformCanvas(QAbstractScrollArea):
             kind = annotation.get("kind")
 
             if kind == "text":
-                if self._text_annotation_rect(annotation).contains(point):
+                rect, _header_height = self._text_annotation_layout(annotation)
+                if rect.adjusted(-4, -4, 4, 4).contains(point):
+                    if self._is_long_text_annotation(annotation):
+                        # Kliknutí kamkoli do dlouhého komentáře ho rozbalí/sbalí.
+                        # Při tažení se stejná oblast používá k přesunu.
+                        return index, "toggle_expanded"
                     return index, "move"
 
             elif kind == "arrow":
@@ -390,34 +547,46 @@ class WaveformCanvas(QAbstractScrollArea):
                     annotation.get("x1_ns", 0),
                     annotation.get("y1", self.RULER_H)
                 )
-
                 end = self._annotation_screen_point(
                     annotation.get("x2_ns", 0),
                     annotation.get("y2", self.RULER_H)
                 )
 
                 start_distance = math.hypot(
-                    point.x() - start.x(),
-                    point.y() - start.y()
+                    point.x() - start.x(), point.y() - start.y()
                 )
-
                 end_distance = math.hypot(
-                    point.x() - end.x(),
-                    point.y() - end.y()
+                    point.x() - end.x(), point.y() - end.y()
                 )
 
                 if start_distance <= 10:
                     return index, "start"
-
                 if end_distance <= 10:
                     return index, "end"
-
                 if self._point_segment_distance(point, start, end) <= 7:
                     return index, "move"
 
         return None, None
 
     def mousePressEvent(self, event):
+        if event.button() == Qt.RightButton:
+            menu = QMenu(self)
+            grid_menu = menu.addMenu("Upravit mřížku")
+            finer = grid_menu.addAction("Jemnější mřížka")
+            coarser = grid_menu.addAction("Hrubší mřížka")
+            grid_menu.addSeparator()
+            current = grid_menu.addAction(
+                f"Aktuální rozteč: {self.annotation_grid_px} px"
+            )
+            current.setEnabled(False)
+            chosen = menu.exec_(self.viewport().mapToGlobal(event.pos()))
+            if chosen is finer:
+                self.adjust_annotation_grid(True)
+            elif chosen is coarser:
+                self.adjust_annotation_grid(False)
+            event.accept()
+            return
+
         if event.button() != Qt.LeftButton:
             return super().mousePressEvent(event)
 
@@ -427,14 +596,17 @@ class WaveformCanvas(QAbstractScrollArea):
             self.viewport().setCursor(Qt.ClosedHandCursor)
             return
 
-        if self.tool == "text":
+        if self.tool in ("text", "long_text"):
             if (
                 event.pos().x() >= self.GUTTER
                 and event.pos().y() >= self.RULER_H
             ):
-                self.textRequested.emit(
+                x_ns, y = self._snap_annotation_point(
                     self._time_at_x(event.pos().x()),
                     self._content_y_at(event.pos().y())
+                )
+                self.textRequested.emit(
+                    x_ns, y, self.tool == "long_text"
                 )
             return
 
@@ -443,7 +615,7 @@ class WaveformCanvas(QAbstractScrollArea):
                 event.pos().x() >= self.GUTTER
                 and event.pos().y() >= self.RULER_H
             ):
-                point = (
+                point = self._snap_annotation_point(
                     self._time_at_x(event.pos().x()),
                     self._content_y_at(event.pos().y())
                 )
@@ -467,7 +639,11 @@ class WaveformCanvas(QAbstractScrollArea):
 
             self.selected_annotation_index = index
             self._drag_annotation_index = index
-            self._drag_part = part
+            self._pending_annotation_action = (
+                "toggle_expanded" if part == "toggle_expanded" else None
+            )
+            # Kliknutí na dlouhý komentář přepne popis; tažení ho přesune.
+            self._drag_part = "move" if part == "toggle_expanded" else part
 
             self._drag_start_pos = (
                 QPoint(event.pos()) if index is not None else None
@@ -535,76 +711,45 @@ class WaveformCanvas(QAbstractScrollArea):
                 ))
 
                 if original.get("kind") == "text":
-                    annotation["x_ns"] = max(
-                        0,
-                        min(
-                            MAX_TIMELINE_NS,
-                            int(original.get("x_ns", 0)) + delta_ns
-                        )
-                    )
-
-                    annotation["y"] = max(
-                        self.RULER_H,
+                    new_x, new_y = self._snap_annotation_point(
+                        int(original.get("x_ns", 0)) + delta_ns,
                         int(original.get("y", self.RULER_H)) + dy
                     )
+                    annotation["x_ns"] = new_x
+                    annotation["y"] = new_y
 
                 elif original.get("kind") == "arrow":
                     if self._drag_part == "start":
-                        annotation["x1_ns"] = max(
-                            0,
-                            min(
-                                MAX_TIMELINE_NS,
-                                int(original.get("x1_ns", 0)) + delta_ns
-                            )
-                        )
-
-                        annotation["y1"] = max(
-                            self.RULER_H,
+                        new_x, new_y = self._snap_annotation_point(
+                            int(original.get("x1_ns", 0)) + delta_ns,
                             int(original.get("y1", self.RULER_H)) + dy
                         )
+                        annotation["x1_ns"] = new_x
+                        annotation["y1"] = new_y
 
                     elif self._drag_part == "end":
-                        annotation["x2_ns"] = max(
-                            0,
-                            min(
-                                MAX_TIMELINE_NS,
-                                int(original.get("x2_ns", 0)) + delta_ns
-                            )
-                        )
-
-                        annotation["y2"] = max(
-                            self.RULER_H,
+                        new_x, new_y = self._snap_annotation_point(
+                            int(original.get("x2_ns", 0)) + delta_ns,
                             int(original.get("y2", self.RULER_H)) + dy
                         )
+                        annotation["x2_ns"] = new_x
+                        annotation["y2"] = new_y
 
                     else:
-                        annotation["x1_ns"] = max(
-                            0,
-                            min(
-                                MAX_TIMELINE_NS,
-                                int(original.get("x1_ns", 0)) + delta_ns
-                            )
-                        )
-
-                        annotation["x2_ns"] = max(
-                            0,
-                            min(
-                                MAX_TIMELINE_NS,
-                                int(original.get("x2_ns", 0)) + delta_ns
-                            )
-                        )
-
-                        annotation["y1"] = max(
-                            self.RULER_H,
+                        new_x1, new_y1 = self._snap_annotation_point(
+                            int(original.get("x1_ns", 0)) + delta_ns,
                             int(original.get("y1", self.RULER_H)) + dy
                         )
-
-                        annotation["y2"] = max(
-                            self.RULER_H,
+                        new_x2, new_y2 = self._snap_annotation_point(
+                            int(original.get("x2_ns", 0)) + delta_ns,
                             int(original.get("y2", self.RULER_H)) + dy
                         )
+                        annotation["x1_ns"] = new_x1
+                        annotation["y1"] = new_y1
+                        annotation["x2_ns"] = new_x2
+                        annotation["y2"] = new_y2
 
-                self._drag_changed = True
+                self._drag_changed = annotation != original
                 self.viewport().update()
 
             return
@@ -622,13 +767,23 @@ class WaveformCanvas(QAbstractScrollArea):
             and self._drag_annotation_index is not None
         ):
             if self._drag_changed:
+                self._update_scrollbars()
                 self.annotationsChanged.emit()
+            elif self._pending_annotation_action == "toggle_expanded":
+                annotation = self.annotations[self._drag_annotation_index]
+                annotation["expanded"] = not bool(
+                    annotation.get("expanded", False)
+                )
+                self._update_scrollbars()
+                self.annotationsChanged.emit()
+                self.viewport().update()
 
             self._drag_annotation_index = None
             self._drag_part = None
             self._drag_start_pos = None
             self._drag_original = None
             self._drag_changed = False
+            self._pending_annotation_action = None
             return
 
         super().mouseReleaseEvent(event)
@@ -779,7 +934,7 @@ class WaveformCanvas(QAbstractScrollArea):
             selected = index == self.selected_annotation_index
 
             if kind == "text":
-                rect = self._text_annotation_rect(
+                rect, header_height = self._text_annotation_layout(
                     annotation,
                     horizontal_offset,
                     vertical_offset
@@ -793,37 +948,95 @@ class WaveformCanvas(QAbstractScrollArea):
                 ):
                     continue
 
-                fill = QColor(
-                    annotation.get("background", "#FFF2B3")
-                )
+                text_color = QColor(annotation.get("color", "#FFFFFF"))
+                if not text_color.isValid():
+                    text_color = QColor("#FFFFFF")
+                font_size = max(6, min(96, int(annotation.get("font_size", 10))))
+                text = str(annotation.get("text", ""))
+
+                if not self._is_long_text_annotation(annotation):
+                    # Výchozí klasický komentář: pouze text, žádné pozadí,
+                    # rámeček ani rozbalovací symbol.
+                    painter.setFont(QFont("Tahoma", font_size))
+                    painter.setPen(text_color)
+                    painter.drawText(
+                        rect.adjusted(1, 1, -1, -1),
+                        Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignTop,
+                        text
+                    )
+                    continue
+
+                # Dlouhý komentář: karta s nadpisem a rozbalovacím popisem.
+                fill = QColor( "#3C3C3C")
+                if not fill.isValid():
+                    fill = QColor("#252525")
                 fill.setAlpha(238)
-
-                painter.setPen(QPen(
-                    QColor("#000000" if selected else "#8B7430"),
-                    2 if selected else 1
-                ))
-
+                border_color = QColor("#818181" if selected else "#1B1B1B")
+                painter.setPen(QPen(border_color, 2 if selected else 1))
                 painter.setBrush(fill)
-                painter.drawRoundedRect(rect, 0, 0)
+                painter.drawRect(rect)
 
-                font = QFont(
-                    "Tahoma",
-                    int(annotation.get("font_size", 10)),
-                    QFont.Bold
+                title_font = QFont("Tahoma", font_size, QFont.Bold)
+                painter.setFont(title_font)
+                painter.setPen(text_color)
+
+                title_rect = QRectF(
+                    rect.left() + 8,
+                    rect.top() + 4,
+                    max(50, rect.width() - 42),
+                    header_height - 8
                 )
-
-                painter.setFont(font)
-                painter.setPen(QColor(
-                    annotation.get("color", "#202020")
-                ))
-
-                text_rect = rect.adjusted(7, 5, -7, -5)
-
-                painter.drawText(
-                    text_rect,
-                    Qt.TextWordWrap | Qt.AlignLeft | Qt.AlignVCenter,
-                    str(annotation.get("text", ""))
+                title_document = self._wrapped_text_document(
+                    text, title_font, title_rect.width(), text_color
                 )
+                painter.save()
+                painter.translate(title_rect.topLeft())
+                title_document.drawContents(
+                    painter,
+                    QRectF(0, 0, title_rect.width(), title_rect.height())
+                )
+                painter.restore()
+
+                toggle_rect = QRectF(
+                    rect.right() - 30,
+                    rect.top(),
+                    30,
+                    header_height
+                )
+                painter.setPen(QPen(border_color, 1))
+                painter.drawLine(
+                    QPointF(toggle_rect.left(), toggle_rect.top()),
+                    QPointF(toggle_rect.left(), toggle_rect.bottom())
+                )
+                glyph = "▾" if annotation.get("expanded", False) else "▸"
+                painter.setPen(text_color)
+                painter.drawText(toggle_rect, Qt.AlignCenter, glyph)
+
+                description = str(annotation.get("description", ""))
+                if annotation.get("expanded", False) and description:
+                    desc_font = QFont("Tahoma", max(8, font_size - 1))
+                    desc_rect = QRectF(
+                        rect.left() + 9,
+                        rect.top() + header_height + 5,
+                        max(1, rect.width() - 18),
+                        max(1, rect.height() - header_height - 10)
+                    )
+                    desc_document = self._wrapped_text_document(
+                        description, desc_font, desc_rect.width(), text_color
+                    )
+                    painter.setFont(desc_font)
+                    painter.setPen(text_color)
+                    painter.save()
+                    painter.translate(desc_rect.topLeft())
+                    desc_document.drawContents(
+                        painter,
+                        QRectF(
+                            0, 0,
+                            desc_rect.width(),
+                            desc_rect.height()
+                        )
+                    )
+                    painter.restore()
 
             elif kind == "arrow":
                 start = self._annotation_screen_point(
@@ -1106,9 +1319,12 @@ class WaveformCanvas(QAbstractScrollArea):
         # Zahrne i anotace umístěné pod posledním kanálem.
         for annotation in self.annotations:
             if annotation.get("kind") == "text":
+                annotation_height = self._text_annotation_layout(
+                    annotation, 0, 0
+                )[0].height()
                 natural_height = max(
                     natural_height,
-                    int(annotation.get("y", self.RULER_H)) + 260
+                    int(annotation.get("y", self.RULER_H) + annotation_height + 12)
                 )
             elif annotation.get("kind") == "arrow":
                 natural_height = max(
@@ -1144,9 +1360,12 @@ class WaveformCanvas(QAbstractScrollArea):
 
         for annotation in self.annotations:
             if annotation.get("kind") == "text":
+                annotation_height = self._text_annotation_layout(
+                    annotation, 0, 0
+                )[0].height()
                 natural_height = max(
                     natural_height,
-                    int(annotation.get("y", self.RULER_H)) + 260
+                    int(annotation.get("y", self.RULER_H) + annotation_height + 12)
                 )
             elif annotation.get("kind") == "arrow":
                 natural_height = max(
@@ -1178,10 +1397,11 @@ class WaveformCanvas(QAbstractScrollArea):
     waveformChanged = _pyqtSignal()
     renameRequested = _pyqtSignal(int)
     zoomRequested = _pyqtSignal(int)
-    textRequested = _pyqtSignal(int, int)
+    textRequested = _pyqtSignal(int, int, bool)
     arrowCreated = _pyqtSignal(int, int, int, int)
     annotationsChanged = _pyqtSignal()
     editTextRequested = _pyqtSignal(int)
+    gridChanged = _pyqtSignal(int)
 
 
 class PoscilogramarWindow(QMainWindow):
@@ -1275,16 +1495,15 @@ class PoscilogramarWindow(QMainWindow):
 
         self._tool_button(
             side,
-            "▣  Vybrat / upravit",
+            "▣  Označit / upravit",
             "select",
-            "Vyberte komentář nebo šipku. Tažením je přesunete, u šipky lze táhnout i konce."
+            "Komentáře a šipky lze přesouvat. Dlouhý komentář rozbalíte nebo sbalíte kliknutím na jeho plochu."
         )
 
-        self._tool_button(
+        self._text_tool_control(
             side,
             "T  Textový komentář",
-            "text",
-            "Klikněte do oscilogramu a napište komentář, například příkaz 0x01."
+            "Klikněte do oscilogramu a napište prostý text bez rámečku."
         )
 
         self._tool_button(
@@ -1416,6 +1635,10 @@ class PoscilogramarWindow(QMainWindow):
             self.edit_text_annotation
         )
 
+        self.canvas.gridChanged.connect(
+            self._on_annotation_grid_changed
+        )
+
         self.status = QLabel("Připraveno")
         self.status.setFont(QFont("Tahoma", 8))
         self.status.setFixedHeight(23)
@@ -1452,6 +1675,47 @@ class PoscilogramarWindow(QMainWindow):
         button.setStyleSheet(retro_button_style())
         button.clicked.connect(callback)
         layout.addWidget(button)
+        return button
+
+    def _text_tool_control(self, layout, text, tooltip):
+        """Hlavní tlačítko tvoří prostý text; šipka nabídne dlouhý komentář."""
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(2)
+
+        button = QPushButton(text)
+        button.setCheckable(True)
+        button.setToolTip(tooltip)
+        button.setFont(QFont("Tahoma", 8))
+        button.setStyleSheet(retro_button_style())
+        self.tool_group.addButton(button)
+        self.tool_buttons["text"] = button
+        button.clicked.connect(lambda _checked=False: self.set_tool("text"))
+        row.addWidget(button, 1)
+
+        dropdown = QToolButton()
+        dropdown.setText("▾")
+        dropdown.setToolTip("Další druh textového komentáře")
+        dropdown.setFixedWidth(27)
+        dropdown.setStyleSheet("""
+            QToolButton {
+                color: #111; background: #C0C0C0;
+                border-top: 2px solid #FFFFFF; border-left: 2px solid #FFFFFF;
+                border-right: 2px solid #404040; border-bottom: 2px solid #404040;
+                padding: 3px;
+            }
+            QToolButton:hover { background: #D6D6D6; }
+            QToolButton:pressed { background: #B5B5B5; }
+            QMenu { background: #C0C0C0; border: 1px solid #404040; }
+        """)
+        menu = QMenu(dropdown)
+        long_action = menu.addAction("Dlouhý komentář…")
+        long_action.triggered.connect(lambda: self.set_tool("long_text"))
+        dropdown.setMenu(menu)
+        dropdown.setPopupMode(QToolButton.InstantPopup)
+        row.addWidget(dropdown)
+
+        layout.addLayout(row)
         return button
 
     def _tool_button(self, layout, text, tool, tooltip):
@@ -1551,6 +1815,10 @@ class PoscilogramarWindow(QMainWindow):
         help_menu = self.menuBar().addMenu("Nápověda")
 
         self._menu_action(
+            help_menu, "Klávesové zkratky", self.show_shortcuts
+        )
+        help_menu.addSeparator()
+        self._menu_action(
             help_menu, "O aplikaci", self.about
         )
 
@@ -1577,6 +1845,18 @@ class PoscilogramarWindow(QMainWindow):
                 lambda d=direction: self.zoom_time(d)
             )
 
+        for sequence, tool in (
+            ("Ctrl+D", "paint"),
+            ("Ctrl+T", "text"),
+            ("Ctrl+E", "select"),
+            ("Ctrl+M", "pan"),
+        ):
+            shortcut = QShortcut(QKeySequence(sequence), self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(
+                lambda selected_tool=tool: self.set_tool(selected_tool)
+            )
+
         delete_shortcut = QShortcut(
             QKeySequence(Qt.Key_Delete),
             self
@@ -1596,6 +1876,9 @@ class PoscilogramarWindow(QMainWindow):
 
         self.canvas.set_annotations(
             self.workspace["annotations"]
+        )
+        self.canvas.set_annotation_grid_px(
+            self.workspace.get("annotation_grid_px", 19)
         )
 
         self.canvas.set_selected_index(
@@ -1661,20 +1944,20 @@ class PoscilogramarWindow(QMainWindow):
     def set_tool(self, tool):
         self.canvas.set_tool(tool)
 
-        if tool in self.tool_buttons:
-            self.tool_buttons[tool].setChecked(True)
+        button_key = "text" if tool == "long_text" else tool
+        if button_key in self.tool_buttons:
+            self.tool_buttons[button_key].setChecked(True)
 
         tips = {
             "paint": "Malování průběhu: kliknutím na mřížku přepnete signál.",
             "pan": "Posouvání: táhněte myší nebo použijte Shift + kolečko.",
-            "select": "Výběr a úpravy: komentář přetáhněte, dvojklikem upravte text; šipku přesuňte nebo upravte její koncové body.",
-            "text": "Textový komentář: klikněte na místo v oscilogramu a zadejte text.",
+            "select": "Označení a úpravy: komentář nebo šipku přetáhněte. Kliknutím na dlouhý komentář zobrazíte či skryjete popis.",
+            "text": "Klasický text: klikněte do oscilogramu a napište prostý text.",
+            "long_text": "Dlouhý komentář: klikněte do oscilogramu a zadejte nadpis i popis.",
             "arrow": "Šipka: klikněte na začátek a potom na konec."
         }
 
-        self.status.setToolTip(
-            tips.get(tool, "")
-        )
+        self.status.setToolTip(tips.get(tool, ""))
 
     def on_channel_selected(self, index):
         self.selected_index = index
@@ -1720,36 +2003,194 @@ class PoscilogramarWindow(QMainWindow):
 
         self.mark_dirty()
 
-    def add_text_annotation(self, x_ns, y):
-        text, ok = QInputDialog.getMultiLineText(
+    def _on_annotation_grid_changed(self, value):
+        self.workspace["annotation_grid_px"] = int(value)
+        self.mark_dirty()
+
+    def show_shortcuts(self):
+        QMessageBox.information(
             self,
-            "Textový komentář",
-            "Text komentáře (např. příkaz 0x01):"
+            "Klávesové zkratky",
+            "NÁSTROJE\n"
+            "Ctrl+D  Malovat průběh\n"
+            "Ctrl+T  Textový komentář\n"
+            "Ctrl+E  Označit / upravit komentář a šipku\n"
+            "Ctrl+M  Posouvat časovou osu\n"
+            "Ctrl+Enter  Potvrdit textový dialog\n\n"
+            "SOUBOR\n"
+            "Ctrl+N  Nový pracovní soubor\n"
+            "Ctrl+O  Otevřít pracovní soubor\n"
+            "Ctrl+S  Uložit\n"
+            "Ctrl+Shift+S  Uložit jako\n"
+            "Delete  Smazat vybranou anotaci\n"
+            "Alt+F4  Ukončit\n\n"
+            "ZOBRAZENÍ\n"
+            "Ctrl++ / Ctrl+=  Přiblížit časovou osu\n"
+            "Ctrl+-  Oddálit časovou osu\n"
+            "Ctrl + kolečko myši  Změnit časovou jednotku\n"
+            "Shift + kolečko myši  Posunout vodorovně\n\n"
+            "Pravé tlačítko myši na oscilogramu: Upravit mřížku anotací."
         )
 
-        if not ok or not text.strip():
+    def _text_annotation_dialog(
+        self,
+        dialog_title,
+        is_long=False,
+        initial_title="",
+        initial_description="",
+        initial_color="#FFFFFF"
+    ):
+        """Dialog prosté poznámky nebo dlouhého komentáře včetně barvy písma.
+
+        Ctrl+Enter (včetně Enter na numerické klávesnici) potvrzuje dialog.
+        """
+        dialog = QDialog(self)
+        dialog.setWindowTitle(dialog_title)
+        dialog.resize(520, 390 if is_long else 300)
+
+        layout = QVBoxLayout(dialog)
+        form = QFormLayout()
+
+        if is_long:
+            title_edit = QLineEdit(str(initial_title))
+            title_edit.setMaxLength(500)
+            title_edit.setPlaceholderText("Krátký nadpis komentáře")
+            form.addRow("Nadpis:", title_edit)
+
+            description_edit = QTextEdit()
+            description_edit.setPlainText(str(initial_description))
+            description_edit.setPlaceholderText("Dlouhý popis komentáře…")
+            description_edit.setMinimumHeight(190)
+            form.addRow("Popis:", description_edit)
+        else:
+            title_edit = QTextEdit()
+            title_edit.setPlainText(str(initial_title))
+            title_edit.setPlaceholderText("Text komentáře…")
+            title_edit.setMinimumHeight(145)
+            form.addRow("Text:", title_edit)
+            description_edit = None
+
+        initial_qcolor = QColor(initial_color)
+        if not initial_qcolor.isValid():
+            initial_qcolor = QColor("#FFFFFF")
+        selected_color = {"value": initial_qcolor.name().upper()}
+
+        color_row = QWidget(dialog)
+        color_layout = QHBoxLayout(color_row)
+        color_layout.setContentsMargins(0, 0, 0, 0)
+        color_layout.setSpacing(7)
+
+        color_preview = QFrame(color_row)
+        color_preview.setFixedSize(28, 22)
+        color_label = QLabel(selected_color["value"], color_row)
+        color_button = QPushButton("Změnit barvu…", color_row)
+        color_button.setFont(QFont("Tahoma", 8))
+        color_button.setStyleSheet(retro_button_style())
+
+        def update_color_preview():
+            color_preview.setStyleSheet(
+                "QFrame { background: %s; border: 1px solid #404040; }"
+                % selected_color["value"]
+            )
+            color_label.setText(selected_color["value"])
+
+        def choose_text_color():
+            chosen = QColorDialog.getColor(
+                QColor(selected_color["value"]),
+                dialog,
+                "Barva písma poznámky"
+            )
+            if chosen.isValid():
+                selected_color["value"] = chosen.name().upper()
+                update_color_preview()
+
+        color_button.clicked.connect(choose_text_color)
+        update_color_preview()
+
+        color_layout.addWidget(color_preview)
+        color_layout.addWidget(color_label)
+        color_layout.addWidget(color_button)
+        color_layout.addStretch(1)
+        form.addRow("Barva písma:", color_row)
+        layout.addLayout(form)
+
+        hint = QLabel("Ctrl+Enter = potvrdit")
+        hint.setStyleSheet("color: #555; font-size: 8pt;")
+        layout.addWidget(hint)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.button(QDialogButtonBox.Ok).setDefault(True)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        # Qt rozlišuje Return a Enter (numerická klávesnice).
+        for sequence in ("Ctrl+Return", "Ctrl+Enter"):
+            shortcut = QShortcut(QKeySequence(sequence), dialog)
+            shortcut.setContext(Qt.WidgetWithChildrenShortcut)
+            shortcut.activated.connect(dialog.accept)
+
+        title_edit.setFocus()
+
+        if dialog.exec_() != QDialog.Accepted:
+            return None
+
+        if is_long:
+            title = title_edit.text().strip()[:500]
+            description = description_edit.toPlainText().strip()[:5000]
+            if not title:
+                QMessageBox.information(
+                    self,
+                    "Dlouhý komentář",
+                    "Dlouhý komentář musí mít krátký nadpis."
+                )
+                return None
+            if not description:
+                QMessageBox.information(
+                    self,
+                    "Dlouhý komentář",
+                    "Zadejte také popisný text."
+                )
+                return None
+            return title, description, selected_color["value"]
+
+        plain_text = title_edit.toPlainText().strip()[:500]
+        if not plain_text:
+            return None
+        return plain_text, "", selected_color["value"]
+
+    def add_text_annotation(self, x_ns, y, is_long=False):
+        fields = self._text_annotation_dialog(
+            "Nový dlouhý komentář" if is_long else "Nový textový komentář",
+            is_long=is_long
+        )
+        if fields is None:
             return
 
-        self.workspace.setdefault(
-            "annotations", []
-        ).append({
+        title, description, text_color = fields
+        comment_type = "long" if is_long else "plain"
+
+        self.workspace.setdefault("annotations", []).append({
             "kind": "text",
+            "comment_type": comment_type,
             "x_ns": int(x_ns),
             "y": int(y),
-            "text": text.strip()[:500],
-            "color": "#202020",
-            "background": "#FFFFFF",
+            "text": title,
+            "description": description,
+            "expandable": bool(is_long),
+            "expanded": False,
+            "color": text_color,
+            "background": "#252525" if is_long else "#FFFFFF",
             "font_size": 10
         })
 
-        self.canvas.set_annotations(
-            self.workspace["annotations"]
-        )
-
+        self.canvas.set_annotations(self.workspace["annotations"])
         self.canvas.selected_annotation_index = (
             len(self.workspace["annotations"]) - 1
         )
-
+        self.canvas._update_scrollbars()
         self.canvas.viewport().update()
         self.mark_dirty()
 
@@ -1784,36 +2225,38 @@ class PoscilogramarWindow(QMainWindow):
         self.mark_dirty()
 
     def edit_text_annotation(self, index):
-        annotations = self.workspace.setdefault(
-            "annotations", []
-        )
-
+        annotations = self.workspace.setdefault("annotations", [])
         if not (0 <= index < len(annotations)):
             return
 
         annotation = annotations[index]
-
         if annotation.get("kind") != "text":
             return
 
-        text, ok = QInputDialog.getMultiLineText(
-            self,
-            "Upravit komentář",
-            "Text komentáře:",
-            str(annotation.get("text", ""))
+        is_long = self.canvas._is_long_text_annotation(annotation)
+        fields = self._text_annotation_dialog(
+            "Upravit dlouhý komentář" if is_long else "Upravit textový komentář",
+            is_long=is_long,
+            initial_title=str(annotation.get("text", "")),
+            initial_description=str(annotation.get("description", "")),
+            initial_color=str(annotation.get("color", "#FFFFFF"))
         )
+        if fields is None:
+            return
 
-        if ok and text.strip():
-            annotation["text"] = text.strip()[:500]
-            self.canvas.viewport().update()
-            self.mark_dirty()
+        (
+            annotation["text"],
+            annotation["description"],
+            annotation["color"]
+        ) = fields
+        annotation["comment_type"] = "long" if is_long else "plain"
+        annotation["expandable"] = bool(is_long)
+        if not is_long:
+            annotation["expanded"] = False
 
-        elif ok:
-            QMessageBox.information(
-                self,
-                "Komentář",
-                "Prázdný komentář nelze uložit. Pro odstranění použijte tlačítko Smazat."
-            )
+        self.canvas._update_scrollbars()
+        self.canvas.viewport().update()
+        self.mark_dirty()
 
     def delete_selected_annotation(self):
         index = (
@@ -1961,15 +2404,27 @@ class PoscilogramarWindow(QMainWindow):
         self._refresh_canvas()
 
     def open_dialog(self):
-        path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Otevřít pracovní soubor",
-            "",
-            "VLČR pracovní soubory (*.vlcr)"
-        )
+        try:
+            ExplorerDialog = _load_file_explorer_dialog_class()
+            start_path = (
+                os.path.dirname(self.current_path)
+                if self.current_path else os.path.expanduser("~")
+            )
+            dialog = ExplorerDialog(
+                mode="open",
+                parent=self,
+                start_path=start_path
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "VLČR Průzkumník není dostupný",
+                str(exc)
+            )
+            return
 
-        if path:
-            self.open_path(path)
+        if dialog.exec_() == QDialog.Accepted and dialog.selected_path:
+            self.open_path(dialog.selected_path)
 
     def open_path(self, path):
         if not self._confirm_discard_changes():
@@ -2008,7 +2463,8 @@ class PoscilogramarWindow(QMainWindow):
                 ),
                 "transition_unit": "ns",
                 "channels": payload["channels"],
-                "annotations": payload.get("annotations", [])
+                "annotations": payload.get("annotations", []),
+                "annotation_grid_px": payload.get("annotation_grid_px", 19)
             }
 
             self.current_path = os.path.abspath(path)
@@ -2038,25 +2494,33 @@ class PoscilogramarWindow(QMainWindow):
         return self._save_to(self.current_path)
 
     def save_as(self):
-        suggested = "Oscilogram.vlcr"
-
-        if self.current_path:
-            suggested = os.path.basename(self.current_path)
-
-        path, _ = QFileDialog.getSaveFileName(
-            self,
-            "Uložit pracovní soubor",
-            suggested,
-            "VLČR pracovní soubory (*.vlcr)"
+        suggested = (
+            os.path.basename(self.current_path)
+            if self.current_path else "Oscilogram.vlcr"
         )
-
-        if not path:
+        try:
+            ExplorerDialog = _load_file_explorer_dialog_class()
+            start_path = (
+                os.path.dirname(self.current_path)
+                if self.current_path else os.path.expanduser("~")
+            )
+            dialog = ExplorerDialog(
+                mode="save",
+                parent=self,
+                start_path=start_path,
+                initial_name=suggested
+            )
+        except Exception as exc:
+            QMessageBox.warning(
+                self,
+                "VLČR Průzkumník není dostupný",
+                str(exc)
+            )
             return False
 
-        if not path.lower().endswith(".vlcr"):
-            path += ".vlcr"
-
-        return self._save_to(path)
+        if dialog.exec_() != QDialog.Accepted or not dialog.selected_path:
+            return False
+        return self._save_to(dialog.selected_path)
 
     def _save_to(self, path):
         try:
